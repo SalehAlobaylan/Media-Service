@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Testing / coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Lint / typecheck
+.ruff_cache/
+.mypy_cache/
+
+# Models cache (pre-downloaded into Docker image)
+models/
+
+# Spooled media uploads
+media_tmp/
+*.tmp.mp3
+*.tmp.mp4
+
+# Local environment
+.env
+.env.local
+.logs/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
