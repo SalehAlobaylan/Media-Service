@@ -1,0 +1,61 @@
+# Phase 8 — aggressive blacklist so the build context stays in the
+# KB range. Models are downloaded INSIDE the image; copying any local
+# `models/` directory in would defeat layer caching and bloat the
+# context.
+
+# Git + VCS
+.git
+.gitignore
+.gitattributes
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Python build / cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+*.egg-info
+.eggs
+build
+dist
+
+# Test + lint caches
+.pytest_cache
+.ruff_cache
+.mypy_cache
+htmlcov
+.coverage
+.coverage.*
+
+# Models (downloaded inside the image via scripts/download_models.py)
+models/
+
+# Spooled media uploads (only present when MEDIA_TEMP_DIR points here)
+media_tmp/
+*.tmp.mp3
+*.tmp.mp4
+
+# Logs + tmp
+.logs
+*.log
+tmp/
+
+# Tests (not needed in prod image)
+tests/
+
+# Editor / OS noise
+.DS_Store
+.vscode
+.idea
+*.swp
+
+# Docs + repo-only files
+README.md
+docker-compose.yml
+Makefile

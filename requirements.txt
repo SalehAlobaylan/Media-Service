@@ -5,6 +5,17 @@ pydantic-settings>=2.0
 httpx>=0.27.0
 structlog>=24.0.0
 faster-whisper>=1.0.0
+
+# ── PyTorch CPU-only ─────────────────────────────────────────
+# Same reason as Enrichment-Service: sentence-transformers (CLIP path)
+# pulls torch transitively, which without the CPU index resolves to the
+# CUDA wheel and ~3 GB of nvidia-* libraries we never call on Cranl's
+# CPU instances. The CPU pin must be ABOVE sentence-transformers in
+# this file so the resolver picks it first.
+# See https://pytorch.org/get-started/locally/ for index conventions.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0,<3.0
+
 sentence-transformers>=3.0.0
 prometheus-fastapi-instrumentator>=7.0.0
 python-multipart>=0.0.12
