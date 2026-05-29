@@ -1,0 +1,55 @@
+# Media-Service — arq WORKER image.
+#
+# Second of two deploy entries built from this one repository:
+#   • Dockerfile         → API container   (uvicorn, serves :5051, enqueues jobs)
+#   • Dockerfile.worker  → worker container (arq, consumes async transcription jobs)
+#
+# Cranl runs one process per app and can't override a run command, so the
+# worker gets its own image whose CMD *is* the arq process. Point a second
+# Cranl app at this Dockerfile; it shares the same repo, branch, and Redis
+# (db=2 via ARQ_REDIS_DB) as the API — that shared db is how this worker
+# finds the jobs the API enqueues.
+#
+# ⚠️ KEEP THE BUILD SECTION BELOW IN SYNC WITH `Dockerfile`. Everything down
+# to (but not including) the final ENV/CMD block is intentionally identical —
+# same base, same deps, same model pre-download. Only the entrypoint differs.
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# System deps:
+#   ffmpeg          — faster-whisper's audio decoding fallback path
+#   libgomp1        — OpenMP runtime, used by sentence-transformers / CLIP
+#   curl            — present for parity with the API image
+#   ca-certificates — HTTPS to Hugging Face / CMS write-back
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libgomp1 \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Same model pre-download as the API image: the worker's warmup() loads both
+# Whisper (transcription) and CLIP via the slim ModelManager, so both must be
+# baked in to avoid a runtime download on cold start.
+COPY scripts/download_models.py ./scripts/download_models.py
+RUN mkdir -p /app/models && python scripts/download_models.py --output /app/models
+
+COPY src ./src
+
+# ── Worker-specific tail ──────────────────────────────────────────────
+# No EXPOSE / PORT: the worker has no HTTP listener. No HTTP HEALTHCHECK for
+# the same reason — Cranl monitors process liveness; if the arq process exits,
+# the container exits and Cranl restarts it.
+ENV MODELS_DIR=/app/models
+
+CMD ["python", "-m", "arq", "src.worker.WorkerSettings"]
