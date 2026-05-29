@@ -166,5 +166,10 @@ class WorkerSettings:
     max_jobs = 1
     # Keep finished job results around long enough for clients to poll.
     keep_result = 3600  # 1 hour
+    # Refresh the health-check key every 30s (arq default is 3600s). The key's
+    # TTL is interval+1s, so a dead worker's key expires within ~31s — this is
+    # what makes the admin dashboard's "worker alive" signal timely instead of
+    # up to an hour stale.
+    health_check_interval = 30
     # Long jobs need long timeouts. Whisper-base on a 90-min podcast is ~10 min.
     job_timeout = 1800  # 30 min
