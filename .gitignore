@@ -27,8 +27,12 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
-# Models cache (pre-downloaded into Docker image)
-models/
+# Models cache (pre-downloaded into Docker image).
+# Anchored to repo root so it ignores ONLY the top-level weights dir —
+# an un-anchored `models/` also matches the `src/models/` source package
+# (git applies it recursively), which silently drops Whisper/CLIP code
+# from the pushed tree and breaks the Cranl build.
+/models/
 
 # Spooled media uploads
 media_tmp/
