@@ -43,6 +43,28 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379"
     ARQ_REDIS_DB: int = 2
 
+    # Object storage (Cloudflare R2 / S3-compatible) for async-transcription
+    # spooling. The API streams the upload here and enqueues the object key;
+    # the separate worker downloads it — so queued audio lives in object
+    # storage, not on the API container's disk, and the two deployments need
+    # no shared volume. Region is "auto" for R2. Empty config ⇒ async uploads
+    # are rejected (the sync route + url-based jobs still work).
+    S3_ENDPOINT_URL: str = ""
+    S3_ACCESS_KEY_ID: str = ""
+    S3_SECRET_ACCESS_KEY: str = ""
+    S3_BUCKET: str = ""
+    S3_CDN_URL: str = ""
+    S3_REGION: str = "auto"
+
+    @property
+    def s3_configured(self) -> bool:
+        return bool(
+            self.S3_ENDPOINT_URL
+            and self.S3_BUCKET
+            and self.S3_ACCESS_KEY_ID
+            and self.S3_SECRET_ACCESS_KEY
+        )
+
     # CORS — CSV of allowed origins. Empty disables CORS; default is
     # wide-open in dev for convenience.
     CORS_ALLOWED_ORIGINS: str = "*"

@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.clients.cms import CMSClient
+from src.clients.storage import StorageClient
 from src.config import Settings
 from src.middleware.error_handler import (
     CircuitOpenError,
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     model_manager = ModelManager(settings)
     cms_client = CMSClient(settings)
+    storage_client = StorageClient(settings)
 
     # arq pool for enqueueing async transcription jobs. Same Redis as the
     # rest of the platform, db=2 by convention. A flaky/missing Redis must
@@ -67,6 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.model_manager = model_manager
     app.state.cms_client = cms_client
     app.state.arq_pool = arq_pool
+    app.state.storage_client = storage_client
 
     logger.info("ready", models=model_manager.is_ready)
     yield

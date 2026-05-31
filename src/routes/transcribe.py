@@ -1,6 +1,7 @@
 import os
 import tempfile
 from typing import Any, Literal
+from uuid import uuid4
 
 from arq.jobs import Job
 from arq.jobs import JobStatus as ArqJobStatus
@@ -131,14 +132,6 @@ async def transcribe(
 # ─── Async transcription endpoints ─────────────────────────────────────
 
 
-def _persisted_upload_path(filename: str) -> str:
-    """Create a temp path the worker can read; the worker is responsible for unlink."""
-    suffix = os.path.splitext(filename)[1] or ".mp3"
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix, dir=TEMP_DIR, prefix="media_async_")
-    os.close(fd)
-    return tmp_path
-
-
 @router.post(
     "/transcribe/jobs",
     response_model=JobAcceptedResponse,
@@ -159,6 +152,7 @@ async def submit_transcribe_job(
     """
     settings = request.app.state.settings
     arq_pool = request.app.state.arq_pool
+    storage = request.app.state.storage_client
 
     if arq_pool is None:
         raise HTTPException(
@@ -176,27 +170,56 @@ async def submit_transcribe_job(
                 f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB"
             )
 
-    audio_path: str | None = None
+    # Uploads are streamed to object storage (R2) rather than the API's local
+    # disk: queued audio then lives in R2 (not piling up on the server while it
+    # waits for a worker), and the separate worker container can fetch it
+    # without a shared filesystem. URL-based jobs skip storage entirely — the
+    # worker downloads the URL directly.
+    storage_key: str | None = None
     try:
         if audio_file and audio_file.filename:
-            audio_path = _persisted_upload_path(audio_file.filename)
-            await _spool_upload_to_disk(audio_file, audio_path, max_bytes)
+            if not storage.is_configured:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Async file uploads require object storage (S3_* not "
+                        "configured). Submit a URL, or configure R2/S3."
+                    ),
+                )
+            suffix = os.path.splitext(audio_file.filename)[1] or ".mp3"
+            storage_key = f"transcribe-jobs/{uuid4().hex}{suffix}"
+            await storage.upload_fileobj(
+                audio_file.file, storage_key, content_type=audio_file.content_type
+            )
         elif not url:
             raise TranscriptionError("Provide either 'audio_file' or 'url'")
 
         # Forward the current request_id into the job so the worker logs line
         # up with this API call when debugging cross-process traces.
         request_id = current_request_id()
+        # Deterministic job id when we have a content_id: an at-least-once
+        # re-submit (e.g. an upstream BullMQ retry of the AI job) coalesces to
+        # the same arq job within keep_result instead of re-transcribing.
+        dedupe_id = f"transcribe:{content_id}" if content_id else None
         job = await arq_pool.enqueue_job(
             "transcribe_task",
-            audio_path,
+            None,  # audio_path — unused now that uploads go through storage
             url,
             content_id,
             language,
             word_timestamps,
             request_id,
+            storage_key,
+            _job_id=dedupe_id,
         )
         if job is None:
+            # arq returns None when a job with this id already exists (queued,
+            # in-progress, or recently completed) — it's already being handled.
+            if dedupe_id is not None:
+                logger.info(
+                    "transcribe_job_deduped", job_id=dedupe_id, content_id=content_id
+                )
+                return JobAcceptedResponse(job_id=dedupe_id)
             raise TranscriptionError("Failed to enqueue transcription job")
 
         transcribe_jobs_total.labels(state="queued").inc()
@@ -204,16 +227,16 @@ async def submit_transcribe_job(
             "transcribe_job_queued",
             job_id=job.job_id,
             content_id=content_id,
-            audio_path=audio_path,
+            storage_key=storage_key,
             url=url,
         )
         return JobAcceptedResponse(job_id=job.job_id)
-    except TranscriptionError:
-        # Spilled-to-disk file is now orphaned — clean up before raising.
-        if audio_path and os.path.exists(audio_path):
+    except (TranscriptionError, HTTPException):
+        # Object was uploaded but enqueue failed — remove it so it doesn't orphan.
+        if storage_key and storage.is_configured:
             try:
-                os.unlink(audio_path)
-            except OSError:
+                await storage.delete_object(storage_key)
+            except Exception:
                 pass
         raise
 

@@ -44,17 +44,24 @@ class ModelManager:
     def all_ready(self) -> bool:
         return self.whisper.is_loaded and self.clip.is_loaded
 
-    async def warmup(self) -> None:
+    async def warmup(self, models: list[str] | None = None) -> None:
+        """Load models concurrently.
+
+        `models=None` loads everything (Whisper + CLIP) — the API process serves
+        both transcription and image embedding. The arq worker passes
+        `["whisper"]` since `transcribe_task` only needs Whisper; loading CLIP
+        there would waste ~600 MB + cold-start time for nothing.
+        """
+        loaders = {"whisper": self.whisper.load, "clip": self.clip.load}
+        selected = list(loaders) if models is None else [m for m in models if m in loaders]
+
         loop = asyncio.get_event_loop()
+        logger.info("loading_models", models=selected)
 
-        logger.info("loading_models")
+        tasks = [loop.run_in_executor(self._executor, loaders[name]) for name in selected]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        whisper_task = loop.run_in_executor(self._executor, self.whisper.load)
-        clip_task = loop.run_in_executor(self._executor, self.clip.load)
-
-        results = await asyncio.gather(whisper_task, clip_task, return_exceptions=True)
-
-        for name, result in zip(["whisper", "clip"], results):
+        for name, result in zip(selected, results):
             if isinstance(result, Exception):
                 logger.error("model_load_failed", model=name, error=str(result))
             else:

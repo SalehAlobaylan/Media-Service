@@ -10,12 +10,14 @@ Or via:  `make worker`
 from __future__ import annotations
 
 import os
+import tempfile
 from typing import Any
 
 from arq.connections import RedisSettings
 from redis.asyncio import Redis
 
 from src.clients.cms import CMSClient
+from src.clients.storage import StorageClient
 from src.config import Settings
 from src.middleware.request_id import _request_id_ctx
 from src.models.manager import ModelManager
@@ -33,16 +35,22 @@ async def _startup(ctx: dict[str, Any]) -> None:
 
     model_manager = ModelManager(settings)
     cms_client = CMSClient(settings)
+    storage_client = StorageClient(settings)
 
-    # Worker loads Whisper + CLIP at startup via the slim ModelManager.
-    # transcribe_task only needs whisper; the CLIP load is cheap (~600 MB)
-    # and keeps the code path identical to the API process.
-    await model_manager.warmup()
+    # The worker only runs transcribe_task (Whisper). Load Whisper only —
+    # CLIP (~600 MB) is image-embedding, which is synchronous in the API and
+    # never touched here.
+    await model_manager.warmup(["whisper"])
 
     ctx["settings"] = settings
     ctx["model_manager"] = model_manager
     ctx["cms_client"] = cms_client
-    logger.info("worker_ready", whisper_loaded=model_manager.whisper.is_loaded)
+    ctx["storage_client"] = storage_client
+    logger.info(
+        "worker_ready",
+        whisper_loaded=model_manager.whisper.is_loaded,
+        storage=storage_client.is_configured,
+    )
 
 
 async def _shutdown(ctx: dict[str, Any]) -> None:
@@ -63,18 +71,26 @@ async def transcribe_task(
     language: str | None,
     word_timestamps: bool,
     request_id: str | None = None,
+    storage_key: str | None = None,
 ) -> dict[str, Any]:
-    """Run transcription. Exactly one of (audio_path, url) should be set.
+    """Run transcription. Exactly one of (storage_key, url, audio_path) is set.
 
     On success returns the serialized TranscribeResponse. On error raises so
     arq marks the job as failed (result preserved in Redis).
 
-    Note: audio_path must be readable by the worker process. The API spools
-    uploads to MEDIA_TEMP_DIR which both processes share.
+    - storage_key: the API uploaded the audio to object storage (R2); the
+      worker downloads it to its own temp dir, transcribes, then deletes the
+      object. This is the path used for file uploads — no shared filesystem.
+    - url: the worker downloads the URL directly (no storage involved).
+    - audio_path: legacy/co-located path where the worker shares the API's
+      filesystem (e.g. the combined-container dev setup).
     """
     # Restore the request-id contextvar so structured logs + outbound headers
     # in this worker process carry the same trace id as the enqueueing API call.
     token = _request_id_ctx.set(request_id) if request_id else None
+    storage_client: StorageClient | None = ctx.get("storage_client")
+    local_download_path: str | None = None
+    succeeded = False
     try:
         model_manager: ModelManager = ctx["model_manager"]
         cms_client: CMSClient = ctx["cms_client"]
@@ -88,14 +104,25 @@ async def transcribe_task(
             "transcribe_task_started",
             job_id=ctx.get("job_id"),
             content_id=content_id,
-            has_audio_path=bool(audio_path),
+            has_storage_key=bool(storage_key),
             has_url=bool(url),
+            has_audio_path=bool(audio_path),
         )
 
         try:
-            if audio_path:
+            if storage_key:
+                if storage_client is None or not storage_client.is_configured:
+                    raise RuntimeError(
+                        "storage_key given but object storage not configured in worker"
+                    )
+                suffix = os.path.splitext(storage_key)[1] or ".mp3"
+                fd, local_download_path = tempfile.mkstemp(
+                    suffix=suffix, prefix="media_async_"
+                )
+                os.close(fd)
+                await storage_client.download_to_path(storage_key, local_download_path)
                 response = await service.transcribe_file(
-                    audio_path,
+                    local_download_path,
                     content_id=content_id,
                     language=language,
                     word_timestamps=word_timestamps,
@@ -107,16 +134,38 @@ async def transcribe_task(
                     language=language,
                     word_timestamps=word_timestamps,
                 )
+            elif audio_path:
+                response = await service.transcribe_file(
+                    audio_path,
+                    content_id=content_id,
+                    language=language,
+                    word_timestamps=word_timestamps,
+                )
             else:
-                raise ValueError("Must provide audio_path or url")
+                raise ValueError("Must provide storage_key, url, or audio_path")
+            succeeded = True
         finally:
-            # Worker is responsible for cleaning up the API-spooled upload —
-            # the API drops its reference once enqueue returns.
-            if audio_path and os.path.exists(audio_path):
-                try:
-                    os.unlink(audio_path)
-                except OSError:
-                    pass
+            # Always drop the worker-local temp files (downloaded object +
+            # legacy spool). The remote object is handled separately below.
+            for path in (local_download_path, audio_path):
+                if path and os.path.exists(path):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
+        # Delete the storage object only on success. On failure we leave it so
+        # an arq retry can re-download; orphans from terminal failures should be
+        # swept by a bucket lifecycle/expiry rule.
+        if succeeded and storage_key and storage_client and storage_client.is_configured:
+            try:
+                await storage_client.delete_object(storage_key)
+            except Exception as exc:
+                logger.warning(
+                    "transcribe_storage_cleanup_failed",
+                    storage_key=storage_key,
+                    error=str(exc),
+                )
 
         transcribe_jobs_total.labels(state="completed").inc()
         logger.info(
