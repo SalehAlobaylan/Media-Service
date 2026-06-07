@@ -5,7 +5,7 @@ import tempfile
 import httpx
 
 from src.clients.cms import CMSClient
-from src.models.whisper import WhisperWrapper
+from src.providers.base import STTProvider
 from src.schemas.transcribe import TranscribeResponse, TranscribeSegment
 from src.utils.logging import get_logger
 from src.utils.metrics import transcription_duration, transcriptions_total
@@ -19,8 +19,8 @@ TEMP_DIR = os.environ.get("MEDIA_TEMP_DIR") or tempfile.gettempdir()
 
 
 class TranscriptionService:
-    def __init__(self, whisper: WhisperWrapper, cms_client: CMSClient):
-        self.whisper = whisper
+    def __init__(self, stt: STTProvider, cms_client: CMSClient):
+        self.stt = stt
         self.cms_client = cms_client
 
     async def transcribe_file(
@@ -30,11 +30,11 @@ class TranscriptionService:
         language: str | None = None,
         word_timestamps: bool = False,
     ) -> TranscribeResponse:
-        model_size = self.whisper.model_size
+        model_size = self.stt.model_size
 
         with transcription_duration.labels(model_size=model_size).time():
             result = await asyncio.to_thread(
-                self.whisper.transcribe,
+                self.stt.transcribe,
                 audio_path,
                 language=language,
                 word_timestamps=word_timestamps,
@@ -96,6 +96,9 @@ class TranscriptionService:
                     full_text=result.text,
                     language=result.language,
                     word_timestamps=segments_data,
+                    segments=segments_data,
+                    source=self.stt.source_label,
+                    provider=self.stt.name,
                 )
                 transcript_id = transcript.get("id") or transcript.get("ID")
                 if transcript_id:

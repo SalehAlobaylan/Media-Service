@@ -37,10 +37,10 @@ async def _startup(ctx: dict[str, Any]) -> None:
     cms_client = CMSClient(settings)
     storage_client = StorageClient(settings)
 
-    # The worker only runs transcribe_task (Whisper). Load Whisper only —
-    # CLIP (~600 MB) is image-embedding, which is synchronous in the API and
-    # never touched here.
-    await model_manager.warmup(["whisper"])
+    # The worker only runs transcribe_task (STT). Load the active STT engine only
+    # — CLIP (~600 MB) is image-embedding, which is synchronous in the API and
+    # never touched here. For a hosted engine (Deepgram) this is a no-op.
+    await model_manager.warmup(["stt"])
 
     ctx["settings"] = settings
     ctx["model_manager"] = model_manager
@@ -48,7 +48,8 @@ async def _startup(ctx: dict[str, Any]) -> None:
     ctx["storage_client"] = storage_client
     logger.info(
         "worker_ready",
-        whisper_loaded=model_manager.whisper.is_loaded,
+        stt_provider=model_manager.stt.name,
+        stt_loaded=model_manager.stt.is_loaded,
         storage=storage_client.is_configured,
     )
 
@@ -94,11 +95,11 @@ async def transcribe_task(
     try:
         model_manager: ModelManager = ctx["model_manager"]
         cms_client: CMSClient = ctx["cms_client"]
-        service = TranscriptionService(model_manager.whisper, cms_client)
+        service = TranscriptionService(model_manager.stt, cms_client)
 
-        if not model_manager.whisper.is_loaded:
+        if not model_manager.stt.is_loaded:
             transcribe_jobs_total.labels(state="failed").inc()
-            raise RuntimeError("Whisper model is not loaded in worker")
+            raise RuntimeError("STT engine is not ready in worker")
 
         logger.info(
             "transcribe_task_started",

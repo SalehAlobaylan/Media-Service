@@ -73,12 +73,12 @@ async def transcribe(
     settings = request.app.state.settings
     model_manager = request.app.state.model_manager
     cms_client = request.app.state.cms_client
-    service = TranscriptionService(model_manager.whisper, cms_client)
+    service = TranscriptionService(model_manager.stt, cms_client)
 
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
 
-    if not model_manager.whisper.is_loaded:
-        raise TranscriptionError("Whisper model is not loaded")
+    if not model_manager.stt.is_loaded:
+        raise TranscriptionError("STT engine is not ready")
 
     # Fast path: reject oversize uploads via Content-Length before streaming.
     if audio_file is not None:
@@ -123,7 +123,7 @@ async def transcribe(
         raise
     except Exception as exc:
         transcriptions_total.labels(
-            status="failure", model_size=model_manager.whisper.model_size
+            status="failure", model_size=model_manager.stt.model_size
         ).inc()
         logger.error("transcription_failed", error=str(exc))
         raise TranscriptionError(f"Transcription failed: {exc}") from exc

@@ -22,10 +22,16 @@ def test_settings() -> Settings:
 @pytest.fixture
 def mock_model_manager() -> MagicMock:
     manager = MagicMock()
-    manager.is_ready = {"whisper": True, "clip": True}
+    manager.is_ready = {"stt": True, "clip": True}
     manager.all_ready = True
 
-    # Whisper mock
+    # Active STT provider mock (Deepgram-shaped)
+    manager.stt.is_loaded = True
+    manager.stt.model_size = "deepgram:nova-3"
+    manager.stt.name = "deepgram"
+    manager.stt.source_label = "stt_deepgram"
+
+    # Whisper wrapper mock (backs the fallback provider)
     manager.whisper.is_loaded = True
     manager.whisper.model_size = "base"
 

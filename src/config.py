@@ -17,6 +17,15 @@ class Settings(BaseSettings):
     CMS_SERVICE_TOKEN: str = ""
     CMS_BASE_URL: str = "http://localhost:8080"
 
+    # STT engine selector (boot-time infra selector — Config Discipline). The
+    # toggle/budget that govern WHEN STT runs live in the CMS transcription_config
+    # table, not here. Default Deepgram Nova-3 (Arabic dialect coverage); set
+    # STT_PROVIDER=whisper for the offline fallback.
+    STT_PROVIDER: str = "deepgram"
+    STT_DEFAULT_LANGUAGE: str = "multi"  # 'multi' = code-switching (ar+en); or 'ar'/'en'
+    DEEPGRAM_API_KEY: str = ""
+    DEEPGRAM_MODEL: str = "nova-3"
+
     # Models
     WHISPER_MODEL_SIZE: str = "base"
     WHISPER_DEVICE: str = "cpu"

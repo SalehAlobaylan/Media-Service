@@ -21,9 +21,9 @@ def _model_items(model_manager) -> list[ModelInfoItem]:
     """Per-model identity (name + dims), shared by /ready and /v1/models."""
     return [
         ModelInfoItem(
-            name=model_manager.whisper.model_size,
-            loaded=model_manager.whisper.is_loaded,
-            type="whisper",
+            name=model_manager.stt.model_size,
+            loaded=model_manager.stt.is_loaded,
+            type="stt",
             dimensions=None,
         ),
         ModelInfoItem(

@@ -65,6 +65,10 @@ class CMSClient:
         language: str,
         word_timestamps: list[dict] | None = None,
         summary: str | None = None,
+        segments: list[dict] | None = None,
+        chapters: list[dict] | None = None,
+        source: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "content_item_id": content_item_id,
@@ -75,6 +79,14 @@ class CMSClient:
             payload["word_timestamps"] = word_timestamps
         if summary:
             payload["summary"] = summary
+        if segments:
+            payload["segments"] = segments
+        if chapters:
+            payload["chapters"] = chapters
+        if source:
+            payload["source"] = source
+        if provider:
+            payload["provider"] = provider
 
         return await self._request(
             "POST",

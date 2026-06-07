@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from src.config import Settings
 from src.models.clip import CLIPWrapper
 from src.models.whisper import WhisperWrapper
+from src.providers.factory import build_stt_provider
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -18,16 +19,20 @@ logger = get_logger(__name__)
 class ModelManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        # Two concurrent loaders — Whisper + CLIP. Cold start is bottlenecked
-        # on the slowest model (typically Whisper).
+        # Two concurrent loaders — STT + CLIP. Cold start is bottlenecked
+        # on the slowest model (Whisper if it's the active STT engine).
         self._executor = ThreadPoolExecutor(max_workers=2)
 
+        # WhisperWrapper is always constructed (cheap; loads lazily) so it can
+        # back the WhisperProvider fallback. The active STT engine is chosen by
+        # the factory from STT_PROVIDER.
         self.whisper = WhisperWrapper(
             model_size=settings.WHISPER_MODEL_SIZE,
             device=settings.WHISPER_DEVICE,
             compute_type=settings.WHISPER_COMPUTE_TYPE,
             download_root=settings.MODELS_DIR,
         )
+        self.stt = build_stt_provider(settings, self.whisper)
         self.clip = CLIPWrapper(
             model_name=settings.CLIP_MODEL,
             cache_folder=settings.MODELS_DIR,
@@ -36,23 +41,26 @@ class ModelManager:
     @property
     def is_ready(self) -> dict[str, bool]:
         return {
-            "whisper": self.whisper.is_loaded,
+            "stt": self.stt.is_loaded,
             "clip": self.clip.is_loaded,
         }
 
     @property
     def all_ready(self) -> bool:
-        return self.whisper.is_loaded and self.clip.is_loaded
+        return self.stt.is_loaded and self.clip.is_loaded
 
     async def warmup(self, models: list[str] | None = None) -> None:
         """Load models concurrently.
 
-        `models=None` loads everything (Whisper + CLIP) — the API process serves
-        both transcription and image embedding. The arq worker passes
-        `["whisper"]` since `transcribe_task` only needs Whisper; loading CLIP
-        there would waste ~600 MB + cold-start time for nothing.
+        `models=None` loads everything (active STT engine + CLIP) — the API
+        process serves both transcription and image embedding. The arq worker
+        passes `["stt"]` since `transcribe_task` only needs the STT engine;
+        loading CLIP there would waste ~600 MB + cold-start time for nothing.
+
+        For a hosted STT engine (Deepgram) the "stt" loader is a no-op, so no
+        local Whisper model is loaded — saving memory on the API + worker.
         """
-        loaders = {"whisper": self.whisper.load, "clip": self.clip.load}
+        loaders = {"stt": self.stt.load, "clip": self.clip.load}
         selected = list(loaders) if models is None else [m for m in models if m in loaders]
 
         loop = asyncio.get_event_loop()
