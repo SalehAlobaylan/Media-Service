@@ -1,8 +1,7 @@
 """arq worker for long-running Media-Service jobs.
 
-Currently handles one job type: transcription. The worker process loads its
-own copy of the Whisper model (separate process from the FastAPI API) and
-runs jobs from Redis until shut down.
+Currently handles one job type: transcription. The worker process uses the
+configured hosted STT provider and runs jobs from Redis until shut down.
 
 Run via: `arq src.worker.WorkerSettings`
 Or via:  `make worker`
@@ -69,6 +68,7 @@ async def transcribe_task(
     audio_path: str | None,
     url: str | None,
     content_id: str | None,
+    transcription_job_id: str | None,
     language: str | None,
     word_timestamps: bool,
     request_id: str | None = None,
@@ -92,12 +92,23 @@ async def transcribe_task(
     storage_client: StorageClient | None = ctx.get("storage_client")
     local_download_path: str | None = None
     succeeded = False
+    service: TranscriptionService | None = None
     try:
         model_manager: ModelManager = ctx["model_manager"]
         cms_client: CMSClient = ctx["cms_client"]
         service = TranscriptionService(model_manager.stt, cms_client)
 
         if not model_manager.stt.is_loaded:
+            if transcription_job_id:
+                await service._update_job(
+                    transcription_job_id,
+                    {
+                        "status": "failed",
+                        "provider": model_manager.stt.name,
+                        "model": model_manager.stt.model_size,
+                        "error_message": "STT engine is not ready in worker",
+                    },
+                )
             transcribe_jobs_total.labels(state="failed").inc()
             raise RuntimeError("STT engine is not ready in worker")
 
@@ -125,6 +136,7 @@ async def transcribe_task(
                 response = await service.transcribe_file(
                     local_download_path,
                     content_id=content_id,
+                    transcription_job_id=transcription_job_id,
                     language=language,
                     word_timestamps=word_timestamps,
                 )
@@ -132,6 +144,7 @@ async def transcribe_task(
                 response = await service.transcribe_url(
                     url,
                     content_id=content_id,
+                    transcription_job_id=transcription_job_id,
                     language=language,
                     word_timestamps=word_timestamps,
                 )
@@ -139,6 +152,7 @@ async def transcribe_task(
                 response = await service.transcribe_file(
                     audio_path,
                     content_id=content_id,
+                    transcription_job_id=transcription_job_id,
                     language=language,
                     word_timestamps=word_timestamps,
                 )
@@ -177,6 +191,14 @@ async def transcribe_task(
         )
         return response.model_dump()
     except Exception as exc:
+        if transcription_job_id and service is not None:
+            await service._update_job(
+                transcription_job_id,
+                {
+                    "status": "failed",
+                    "error_message": str(exc),
+                },
+            )
         transcribe_jobs_total.labels(state="failed").inc()
         logger.error(
             "transcribe_task_failed",
@@ -211,8 +233,8 @@ class WorkerSettings:
     on_startup = _startup
     on_shutdown = _shutdown
     redis_settings = _build_redis_settings()
-    # Jobs are slow (Whisper transcription on CPU). One concurrent job per
-    # worker process is the right default — operators add replicas to scale.
+    # Jobs are network/billing-sensitive. One concurrent job per worker process
+    # is the conservative default — operators add replicas to scale.
     max_jobs = 1
     # Keep finished job results around long enough for clients to poll.
     keep_result = 3600  # 1 hour
@@ -221,5 +243,6 @@ class WorkerSettings:
     # what makes the admin dashboard's "worker alive" signal timely instead of
     # up to an hour stale.
     health_check_interval = 30
-    # Long jobs need long timeouts. Whisper-base on a 90-min podcast is ~10 min.
+    # Long jobs need long timeouts; hosted providers still process long podcasts
+    # asynchronously and can take several minutes end to end.
     job_timeout = 1800  # 30 min

@@ -61,12 +61,33 @@ async def _spool_upload_to_disk(
     return written
 
 
+async def _mark_transcription_job_failed(
+    request: Request,
+    transcription_job_id: str | None,
+    message: str,
+) -> None:
+    if not transcription_job_id:
+        return
+    model_manager = request.app.state.model_manager
+    service = TranscriptionService(model_manager.stt, request.app.state.cms_client)
+    await service._update_job(
+        transcription_job_id,
+        {
+            "status": "failed",
+            "provider": model_manager.stt.name,
+            "model": model_manager.stt.model_size,
+            "error_message": message,
+        },
+    )
+
+
 @router.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe(
     request: Request,
     audio_file: UploadFile | None = File(None),
     url: str | None = Form(None),
     content_id: str | None = Form(None),
+    transcription_job_id: str | None = Form(None),
     language: str | None = Form(None),
     word_timestamps: bool = Form(False),
 ) -> TranscribeResponse:
@@ -78,12 +99,20 @@ async def transcribe(
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
 
     if not model_manager.stt.is_loaded:
+        await _mark_transcription_job_failed(
+            request, transcription_job_id, "STT engine is not ready"
+        )
         raise TranscriptionError("STT engine is not ready")
 
     # Fast path: reject oversize uploads via Content-Length before streaming.
     if audio_file is not None:
         content_length = request.headers.get("content-length")
         if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+            await _mark_transcription_job_failed(
+                request,
+                transcription_job_id,
+                f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB",
+            )
             raise TranscriptionError(
                 f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB"
             )
@@ -99,6 +128,7 @@ async def transcribe(
                 return await service.transcribe_file(
                     tmp_path,
                     content_id=content_id,
+                    transcription_job_id=transcription_job_id,
                     language=language,
                     word_timestamps=word_timestamps,
                 )
@@ -112,6 +142,7 @@ async def transcribe(
             return await service.transcribe_url(
                 url,
                 content_id=content_id,
+                transcription_job_id=transcription_job_id,
                 language=language,
                 word_timestamps=word_timestamps,
             )
@@ -142,6 +173,7 @@ async def submit_transcribe_job(
     audio_file: UploadFile | None = File(None),
     url: str | None = Form(None),
     content_id: str | None = Form(None),
+    transcription_job_id: str | None = Form(None),
     language: str | None = Form(None),
     word_timestamps: bool = Form(False),
 ) -> JobAcceptedResponse:
@@ -155,6 +187,11 @@ async def submit_transcribe_job(
     storage = request.app.state.storage_client
 
     if arq_pool is None:
+        await _mark_transcription_job_failed(
+            request,
+            transcription_job_id,
+            "Async transcription unavailable: Redis (arq) not reachable",
+        )
         raise HTTPException(
             status_code=503,
             detail="Async transcription unavailable: Redis (arq) not reachable",
@@ -166,6 +203,11 @@ async def submit_transcribe_job(
     if audio_file is not None:
         content_length = request.headers.get("content-length")
         if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+            await _mark_transcription_job_failed(
+                request,
+                transcription_job_id,
+                f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB",
+            )
             raise TranscriptionError(
                 f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB"
             )
@@ -200,12 +242,14 @@ async def submit_transcribe_job(
         # Deterministic job id when we have a content_id: an at-least-once
         # re-submit (e.g. an upstream BullMQ retry of the AI job) coalesces to
         # the same arq job within keep_result instead of re-transcribing.
-        dedupe_id = f"transcribe:{content_id}" if content_id else None
+        dedupe_key = transcription_job_id or content_id
+        dedupe_id = f"transcribe:{dedupe_key}" if dedupe_key else None
         job = await arq_pool.enqueue_job(
             "transcribe_task",
             None,  # audio_path — unused now that uploads go through storage
             url,
             content_id,
+            transcription_job_id,
             language,
             word_timestamps,
             request_id,
@@ -238,6 +282,9 @@ async def submit_transcribe_job(
                 await storage.delete_object(storage_key)
             except Exception:
                 pass
+        await _mark_transcription_job_failed(
+            request, transcription_job_id, "Failed to enqueue transcription job"
+        )
         raise
 
 

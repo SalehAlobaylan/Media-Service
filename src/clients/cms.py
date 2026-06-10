@@ -1,7 +1,7 @@
 """Trimmed CMS client for Media-Service.
 
 Only exposes the write-back methods Media needs:
-- create_transcript / link_transcript (Whisper transcription pipeline)
+- create_transcript (hosted transcription pipeline)
 - store_image_embedding (CLIP image embedding write-back)
 - health_check / update_status (operational)
 
@@ -69,6 +69,9 @@ class CMSClient:
         chapters: list[dict] | None = None,
         source: str | None = None,
         provider: str | None = None,
+        transcription_job_id: str | None = None,
+        language_probability: float | None = None,
+        duration_sec: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "content_item_id": content_item_id,
@@ -87,6 +90,12 @@ class CMSClient:
             payload["source"] = source
         if provider:
             payload["provider"] = provider
+        if transcription_job_id:
+            payload["transcription_job_id"] = transcription_job_id
+        if language_probability is not None:
+            payload["language_probability"] = language_probability
+        if duration_sec is not None:
+            payload["duration_sec"] = duration_sec
 
         return await self._request(
             "POST",
@@ -95,12 +104,16 @@ class CMSClient:
             metric_label="create_transcript",
         )
 
-    async def link_transcript(self, content_id: str, transcript_id: str) -> dict[str, Any]:
+    async def update_transcription_job(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
         return await self._request(
             "PATCH",
-            f"/internal/content-items/{content_id}/transcript",
-            json={"transcript_id": transcript_id},
-            metric_label="link_transcript",
+            f"/internal/transcription-jobs/{job_id}",
+            json=payload,
+            metric_label="update_transcription_job",
         )
 
     async def store_image_embedding(

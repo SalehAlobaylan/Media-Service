@@ -23,9 +23,8 @@ class ModelManager:
         # on the slowest model (Whisper if it's the active STT engine).
         self._executor = ThreadPoolExecutor(max_workers=2)
 
-        # WhisperWrapper is always constructed (cheap; loads lazily) so it can
-        # back the WhisperProvider fallback. The active STT engine is chosen by
-        # the factory from STT_PROVIDER.
+        # WhisperWrapper is still constructed for legacy model metadata paths,
+        # but hosted STT is the only supported transcription provider now.
         self.whisper = WhisperWrapper(
             model_size=settings.WHISPER_MODEL_SIZE,
             device=settings.WHISPER_DEVICE,

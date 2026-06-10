@@ -19,8 +19,7 @@ class Settings(BaseSettings):
 
     # STT engine selector (boot-time infra selector — Config Discipline). The
     # toggle/budget that govern WHEN STT runs live in the CMS transcription_config
-    # table, not here. Default Deepgram Nova-3 (Arabic dialect coverage); set
-    # STT_PROVIDER=whisper for the offline fallback.
+    # table, not here. Default Deepgram Nova-3 (Arabic dialect coverage).
     STT_PROVIDER: str = "deepgram"
     STT_DEFAULT_LANGUAGE: str = "multi"  # 'multi' = code-switching (ar+en); or 'ar'/'en'
     DEEPGRAM_API_KEY: str = ""

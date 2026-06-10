@@ -27,18 +27,43 @@ class TranscriptionService:
         self,
         audio_path: str,
         content_id: str | None = None,
+        transcription_job_id: str | None = None,
         language: str | None = None,
         word_timestamps: bool = False,
     ) -> TranscribeResponse:
         model_size = self.stt.model_size
 
-        with transcription_duration.labels(model_size=model_size).time():
-            result = await asyncio.to_thread(
-                self.stt.transcribe,
-                audio_path,
-                language=language,
-                word_timestamps=word_timestamps,
+        if transcription_job_id:
+            await self._update_job(
+                transcription_job_id,
+                {
+                    "status": "running",
+                    "provider": self.stt.name,
+                    "model": model_size,
+                    "language": language,
+                },
             )
+
+        try:
+            with transcription_duration.labels(model_size=model_size).time():
+                result = await asyncio.to_thread(
+                    self.stt.transcribe,
+                    audio_path,
+                    language=language,
+                    word_timestamps=word_timestamps,
+                )
+        except Exception as exc:
+            if transcription_job_id:
+                await self._update_job(
+                    transcription_job_id,
+                    {
+                        "status": "failed",
+                        "provider": self.stt.name,
+                        "model": model_size,
+                        "error_message": str(exc),
+                    },
+                )
+            raise
 
         transcriptions_total.labels(status="success", model_size=model_size).inc()
 
@@ -46,14 +71,32 @@ class TranscriptionService:
             text=result.text,
             language=result.language,
             language_probability=result.language_probability,
+            provider=self.stt.name,
+            model=model_size,
             segments=[TranscribeSegment(**seg) for seg in result.segments],
             duration_sec=result.duration_sec,
         )
 
         if content_id:
-            status, error = await self._write_back(content_id, response)
+            status, error = await self._write_back(
+                content_id, response, transcription_job_id=transcription_job_id
+            )
             response.write_back_status = status
             response.write_back_error = error
+        elif transcription_job_id:
+            await self._update_job(
+                transcription_job_id,
+                {
+                    "status": "succeeded",
+                    "provider": self.stt.name,
+                    "model": model_size,
+                    "language": response.language,
+                    "duration_sec": response.duration_sec,
+                    "metadata": {
+                        "language_probability": response.language_probability,
+                    },
+                },
+            )
 
         return response
 
@@ -61,14 +104,29 @@ class TranscriptionService:
         self,
         url: str,
         content_id: str | None = None,
+        transcription_job_id: str | None = None,
         language: str | None = None,
         word_timestamps: bool = False,
     ) -> TranscribeResponse:
-        audio_path = await self._download(url)
+        try:
+            audio_path = await self._download(url)
+        except Exception as exc:
+            if transcription_job_id:
+                await self._update_job(
+                    transcription_job_id,
+                    {
+                        "status": "failed",
+                        "provider": self.stt.name,
+                        "model": self.stt.model_size,
+                        "error_message": f"media download failed: {exc}",
+                    },
+                )
+            raise
         try:
             return await self.transcribe_file(
                 audio_path,
                 content_id=content_id,
+                transcription_job_id=transcription_job_id,
                 language=language,
                 word_timestamps=word_timestamps,
             )
@@ -76,7 +134,10 @@ class TranscriptionService:
             self._cleanup(audio_path)
 
     async def _write_back(
-        self, content_id: str, result: TranscribeResponse
+        self,
+        content_id: str,
+        result: TranscribeResponse,
+        transcription_job_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Persist transcript to CMS. Returns (status, error_message).
 
@@ -91,7 +152,7 @@ class TranscriptionService:
         last_error: str | None = None
         for attempt in range(2):
             try:
-                transcript = await self.cms_client.create_transcript(
+                await self.cms_client.create_transcript(
                     content_item_id=content_id,
                     full_text=result.text,
                     language=result.language,
@@ -99,12 +160,10 @@ class TranscriptionService:
                     segments=segments_data,
                     source=self.stt.source_label,
                     provider=self.stt.name,
+                    transcription_job_id=transcription_job_id,
+                    language_probability=result.language_probability,
+                    duration_sec=result.duration_sec,
                 )
-                transcript_id = transcript.get("id") or transcript.get("ID")
-                if transcript_id:
-                    await self.cms_client.link_transcript(
-                        content_id, str(transcript_id)
-                    )
                 logger.info("transcript_writeback_complete", content_id=content_id)
                 return "ok", None
             except Exception as exc:
@@ -123,7 +182,32 @@ class TranscriptionService:
             content_id=content_id,
             error=last_error,
         )
+        if transcription_job_id:
+            await self._update_job(
+                transcription_job_id,
+                {
+                    "status": "writeback_failed",
+                    "provider": self.stt.name,
+                    "model": self.stt.model_size,
+                    "language": result.language,
+                    "duration_sec": result.duration_sec,
+                    "error_message": last_error,
+                    "metadata": {
+                        "language_probability": result.language_probability,
+                    },
+                },
+            )
         return "failed", last_error
+
+    async def _update_job(self, job_id: str, payload: dict) -> None:
+        try:
+            await self.cms_client.update_transcription_job(job_id, payload)
+        except Exception as exc:
+            logger.warning(
+                "transcription_job_update_failed",
+                job_id=job_id,
+                error=str(exc),
+            )
 
     async def _download(self, url: str) -> str:
         async with httpx.AsyncClient(timeout=120) as client:

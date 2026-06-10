@@ -27,7 +27,7 @@ class ReadyResponse(BaseModel):
     models: dict[str, bool]
     dependencies: dict[str, bool]
     # Richer per-model identity (name + dims), additive to the bool `models`
-    # map. `type` is the role (whisper/clip) — the admin dashboard joins on it
+    # map. `type` is the role (stt/clip) — the admin dashboard joins on it
     # to show model names/dims instead of bare load booleans.
     models_detail: list[ModelInfoItem] = []
 

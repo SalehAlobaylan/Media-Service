@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="Media Service",
     description="Media-processing microservice for the Wahb platform "
-    "(Whisper transcription, CLIP image embedding, future OCR/video).",
+    "(hosted transcription, CLIP image embedding, future OCR/video).",
     version="1.0.0",
     lifespan=lifespan,
 )

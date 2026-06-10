@@ -23,7 +23,7 @@ def test_ready_reports_models_and_cms(client) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    assert body["models"] == {"whisper": True, "clip": True}
+    assert body["models"] == {"stt": True, "clip": True}
     assert body["dependencies"]["cms"] is True
 
 

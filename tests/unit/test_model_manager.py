@@ -17,7 +17,7 @@ def _manager() -> ModelManager:
         CMS_BASE_URL="http://localhost:8080",
         MODELS_DIR="./test-models",
         ENV="test",
-        # No DEEPGRAM_API_KEY → factory selects the Whisper fallback provider.
+        DEEPGRAM_API_KEY="test-deepgram-key",
     )
     mgr = ModelManager(settings)
     # Replace the heavy load() calls — we only assert which ones fire.

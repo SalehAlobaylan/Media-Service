@@ -31,7 +31,7 @@ def mock_model_manager() -> MagicMock:
     manager.stt.name = "deepgram"
     manager.stt.source_label = "stt_deepgram"
 
-    # Whisper wrapper mock (backs the fallback provider)
+    # Legacy Whisper wrapper metadata; not used as an STT fallback.
     manager.whisper.is_loaded = True
     manager.whisper.model_size = "base"
 
@@ -48,7 +48,6 @@ def mock_cms_client() -> AsyncMock:
     client = AsyncMock(spec=CMSClient)
     client.health_check.return_value = True
     client.create_transcript.return_value = {"id": "transcript-123"}
-    client.link_transcript.return_value = {"ok": True}
     client.store_image_embedding.return_value = {"ok": True}
     client.update_status.return_value = {"ok": True}
     return client

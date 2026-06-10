@@ -19,6 +19,8 @@ class TranscribeResponse(BaseModel):
     text: str
     language: str
     language_probability: float
+    provider: str | None = None
+    model: str | None = None
     segments: list[TranscribeSegment]
     duration_sec: float
     write_back_status: WriteBackStatus = "not_attempted"

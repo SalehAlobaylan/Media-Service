@@ -1,9 +1,9 @@
 """Swappable speech-to-text provider interface.
 
-Media-Service was Whisper-only. This abstraction lets the engine be selected at
-boot via STT_PROVIDER (Deepgram Nova-3 by default for Arabic dialect coverage;
-faster-whisper kept as a disabled offline fallback). Adding ElevenLabs Scribe /
-OpenAI gpt-4o-transcribe later is one new subclass + a factory branch.
+Media-Service was Whisper-only. This abstraction keeps CMS/Console contracts
+engine-agnostic while the active hosted provider is selected at boot via
+STT_PROVIDER. Adding ElevenLabs Scribe / OpenAI transcription later is one new
+subclass + a factory branch.
 
 All providers return the shared TranscribeResult so the TranscriptionService and
 CMS write-back are engine-agnostic.
@@ -23,14 +23,13 @@ class STTProvider(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Concrete engine name, e.g. 'deepgram' or 'faster-whisper'. Stored as
-        Transcript.provider."""
+        """Concrete engine name, e.g. 'deepgram'. Stored as Transcript.provider."""
 
     @property
     @abstractmethod
     def source_label(self) -> str:
-        """Transcript provenance written to CMS, e.g. 'stt_deepgram' /
-        'stt_whisper'. CMS maps this to caption_state=stt_done."""
+        """Transcript provenance written to CMS, e.g. 'stt_deepgram'.
+        CMS maps this to caption_state=stt_done."""
 
     @property
     @abstractmethod
@@ -45,8 +44,8 @@ class STTProvider(ABC):
 
     @property
     def requires_warmup(self) -> bool:
-        """True for engines that load a local model (Whisper). Hosted API engines
-        (Deepgram) return False so the worker/API skip the Whisper warmup."""
+        """True for engines that load a local model. Hosted API engines return
+        False so the worker/API skip local model warmup."""
         return False
 
     def load(self) -> None:

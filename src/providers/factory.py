@@ -1,8 +1,8 @@
 """STT provider selection.
 
-Picks the engine from STT_PROVIDER at boot (a model-selector env var — allowed
-by Config Discipline). Defaults to Deepgram Nova-3; falls back to faster-whisper
-when whisper is selected or when Deepgram has no API key.
+Picks the hosted engine from STT_PROVIDER at boot. Whisper fallback is disabled:
+missing credentials or unknown providers must surface as visible readiness/job
+failures instead of silently changing transcript quality.
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from src.config import Settings
 from src.models.whisper import WhisperWrapper
 from src.providers.base import STTProvider
 from src.providers.deepgram_provider import DeepgramProvider
-from src.providers.whisper_provider import WhisperProvider
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -20,16 +19,14 @@ def build_stt_provider(settings: Settings, whisper_wrapper: WhisperWrapper) -> S
     provider = (settings.STT_PROVIDER or "deepgram").strip().lower()
 
     if provider in ("whisper", "faster-whisper"):
-        logger.info("stt_provider_selected", provider="faster-whisper")
-        return WhisperProvider(whisper_wrapper)
+        raise RuntimeError("Whisper STT is disabled; configure a hosted STT provider")
 
     if provider == "deepgram":
         if not settings.DEEPGRAM_API_KEY:
             logger.warning(
-                "deepgram_key_missing_falling_back_to_whisper",
+                "deepgram_key_missing_stt_not_ready",
                 hint="set DEEPGRAM_API_KEY to use Deepgram",
             )
-            return WhisperProvider(whisper_wrapper)
         logger.info("stt_provider_selected", provider="deepgram", model=settings.DEEPGRAM_MODEL)
         return DeepgramProvider(
             api_key=settings.DEEPGRAM_API_KEY,
@@ -38,5 +35,4 @@ def build_stt_provider(settings: Settings, whisper_wrapper: WhisperWrapper) -> S
             timeout_sec=settings.TRANSCRIBE_TIMEOUT_SEC,
         )
 
-    logger.warning("unknown_stt_provider_falling_back_to_whisper", provider=provider)
-    return WhisperProvider(whisper_wrapper)
+    raise RuntimeError(f"Unknown STT_PROVIDER: {provider}")
