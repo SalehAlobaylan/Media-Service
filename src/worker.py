@@ -20,7 +20,7 @@ from src.clients.storage import StorageClient
 from src.config import Settings
 from src.middleware.request_id import _request_id_ctx
 from src.models.manager import ModelManager
-from src.services.transcription import TranscriptionService
+from src.services.transcription import TranscriptionService, provider_error_code
 from src.utils.logging import get_logger, setup_logging
 from src.utils.metrics import transcribe_jobs_total
 
@@ -107,6 +107,7 @@ async def transcribe_task(
                         "provider": model_manager.stt.name,
                         "model": model_manager.stt.model_size,
                         "error_message": "STT engine is not ready in worker",
+                        "provider_error_code": "stt_not_ready",
                     },
                 )
             transcribe_jobs_total.labels(state="failed").inc()
@@ -197,6 +198,7 @@ async def transcribe_task(
                 {
                     "status": "failed",
                     "error_message": str(exc),
+                    "provider_error_code": provider_error_code(exc),
                 },
             )
         transcribe_jobs_total.labels(state="failed").inc()
@@ -243,6 +245,9 @@ class WorkerSettings:
     # what makes the admin dashboard's "worker alive" signal timely instead of
     # up to an hour stale.
     health_check_interval = 30
+    # Required for DELETE /v1/transcribe/jobs/{id} (batch cancel). Without this,
+    # arq ignores Job.abort() and queued jobs run anyway.
+    allow_abort_jobs = True
     # Long jobs need long timeouts; hosted providers still process long podcasts
     # asynchronously and can take several minutes end to end.
     job_timeout = 1800  # 30 min

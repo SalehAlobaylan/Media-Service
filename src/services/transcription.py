@@ -9,6 +9,7 @@ from src.providers.base import STTProvider
 from src.schemas.transcribe import TranscribeResponse, TranscribeSegment
 from src.utils.logging import get_logger
 from src.utils.metrics import transcription_duration, transcriptions_total
+from src.utils.url_guard import UnsafeURLError, validate_public_url
 
 logger = get_logger(__name__)
 
@@ -16,6 +17,26 @@ logger = get_logger(__name__)
 # uploads land) and the arq worker process (which reads them). Empty / unset
 # falls back to the system tempdir so dev works without extra config.
 TEMP_DIR = os.environ.get("MEDIA_TEMP_DIR") or tempfile.gettempdir()
+
+
+def provider_error_code(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "api_key" in message or "not set" in message or "not ready" in message:
+        return "missing_key"
+    if isinstance(exc, (httpx.TimeoutException, TimeoutError)) or "timeout" in message:
+        return "timeout"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status == 429:
+            return "quota_or_rate_limit"
+        if status in (400, 422) and "language" in message:
+            return "unsupported_language"
+        return f"provider_http_{status}"
+    if "quota" in message or "rate limit" in message or "too many requests" in message:
+        return "quota_or_rate_limit"
+    if "language" in message and ("unsupported" in message or "invalid" in message):
+        return "unsupported_language"
+    return "provider_error"
 
 
 class TranscriptionService:
@@ -61,6 +82,7 @@ class TranscriptionService:
                         "provider": self.stt.name,
                         "model": model_size,
                         "error_message": str(exc),
+                        "provider_error_code": provider_error_code(exc),
                     },
                 )
             raise
@@ -119,6 +141,7 @@ class TranscriptionService:
                         "provider": self.stt.name,
                         "model": self.stt.model_size,
                         "error_message": f"media download failed: {exc}",
+                        "provider_error_code": "media_download_failed",
                     },
                 )
             raise
@@ -192,6 +215,8 @@ class TranscriptionService:
                     "language": result.language,
                     "duration_sec": result.duration_sec,
                     "error_message": last_error,
+                    "writeback_status": "failed",
+                    "writeback_error": last_error,
                     "metadata": {
                         "language_probability": result.language_probability,
                     },
@@ -210,6 +235,10 @@ class TranscriptionService:
             )
 
     async def _download(self, url: str) -> str:
+        try:
+            validate_public_url(url)
+        except UnsafeURLError as exc:
+            raise ValueError(f"Refusing to fetch unsafe URL: {exc}") from exc
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.get(url)
             resp.raise_for_status()

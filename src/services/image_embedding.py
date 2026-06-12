@@ -18,6 +18,7 @@ from src.models.clip import CLIPWrapper
 from src.schemas.embed_image import ImageEmbedResponse
 from src.utils.logging import get_logger
 from src.utils.metrics import image_embeddings_total
+from src.utils.url_guard import UnsafeURLError, validate_public_url
 
 logger = get_logger(__name__)
 
@@ -72,6 +73,10 @@ class ImageEmbeddingService:
         return await self.embed_bytes(image_bytes, content_id=content_id)
 
     async def _download(self, url: str) -> bytes:
+        try:
+            validate_public_url(url)
+        except UnsafeURLError as exc:
+            raise ValueError(f"Refusing to fetch unsafe URL: {exc}") from exc
         async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT_SEC) as client:
             async with client.stream("GET", url) as resp:
                 resp.raise_for_status()

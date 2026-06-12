@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from typing import Any, Literal
@@ -42,6 +43,13 @@ class JobStatusResponse(BaseModel):
     error: str | None = None
 
 
+class JobCancelResponse(BaseModel):
+    job_id: str
+    status: str
+    canceled: bool
+    reason: str | None = None
+
+
 async def _spool_upload_to_disk(
     upload: UploadFile, tmp_path: str, max_bytes: int
 ) -> int:
@@ -77,6 +85,7 @@ async def _mark_transcription_job_failed(
             "provider": model_manager.stt.name,
             "model": model_manager.stt.model_size,
             "error_message": message,
+            "provider_error_code": "stt_not_ready",
         },
     )
 
@@ -353,4 +362,73 @@ async def get_transcribe_job(job_id: str, request: Request) -> JobStatusResponse
             job_id=job_id,
             status="failed",
             error=str(info.result) if info.result else "Job failed",
+        )
+
+
+@router.delete("/transcribe/jobs/{job_id}", response_model=JobCancelResponse)
+async def cancel_transcribe_job(job_id: str, request: Request) -> JobCancelResponse:
+    """Best-effort async transcription cancellation.
+
+    Queued/deferred ARQ jobs can usually be aborted. In-progress jobs may already
+    be inside the hosted provider call, so callers must treat cancellation as
+    advisory and keep CMS as the source of truth.
+    """
+    arq_pool = request.app.state.arq_pool
+    if arq_pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Async transcription unavailable: Redis (arq) not reachable",
+        )
+    job = Job(job_id, redis=arq_pool)
+    status = await job.status()
+    if status == ArqJobStatus.not_found:
+        return JobCancelResponse(
+            job_id=job_id,
+            status="not_found",
+            canceled=False,
+            reason="job not found",
+        )
+    if status == ArqJobStatus.complete:
+        return JobCancelResponse(
+            job_id=job_id,
+            status="completed",
+            canceled=False,
+            reason="job already completed",
+        )
+    if status == ArqJobStatus.in_progress:
+        return JobCancelResponse(
+            job_id=job_id,
+            status="in_progress",
+            canceled=False,
+            reason="job already running; provider call may finish",
+        )
+    try:
+        abort = getattr(job, "abort", None)
+        if abort is None:
+            return JobCancelResponse(
+                job_id=job_id,
+                status=str(status),
+                canceled=False,
+                reason="arq job abort is unavailable",
+            )
+        # abort(timeout=None) waits FOREVER for the job result — bound it so a
+        # cancel request can't hang the handler. The worker honors the abort
+        # flag (allow_abort_jobs=True in WorkerSettings); if confirmation
+        # doesn't arrive in time, report it as advisory.
+        await abort(timeout=5)
+        return JobCancelResponse(job_id=job_id, status=str(status), canceled=True)
+    except (TimeoutError, asyncio.TimeoutError):
+        return JobCancelResponse(
+            job_id=job_id,
+            status=str(status),
+            canceled=False,
+            reason="abort requested; confirmation timed out (advisory)",
+        )
+    except Exception as exc:
+        logger.warning("transcribe_job_cancel_failed", job_id=job_id, error=str(exc))
+        return JobCancelResponse(
+            job_id=job_id,
+            status=str(status),
+            canceled=False,
+            reason=str(exc),
         )
