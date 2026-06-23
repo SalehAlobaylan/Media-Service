@@ -90,15 +90,18 @@ class DeepgramProvider(STTProvider):
         headers = {
             "Authorization": f"Token {self._api_key}",
             "Content-Type": content_type,
+            # Stream the file from disk (content=f) to avoid loading large
+            # podcasts fully into memory, but set Content-Length explicitly:
+            # without it httpx falls back to chunked transfer-encoding, which
+            # Deepgram's pre-recorded REST endpoint rejects.
+            "Content-Length": str(os.path.getsize(audio_path)),
         }
 
-        with open(audio_path, "rb") as f:
-            audio_bytes = f.read()
-
         with httpx.Client(timeout=self._timeout_sec) as client:
-            resp = client.post(
-                DEEPGRAM_URL, params=params, headers=headers, content=audio_bytes
-            )
+            with open(audio_path, "rb") as f:
+                resp = client.post(
+                    DEEPGRAM_URL, params=params, headers=headers, content=f
+                )
             resp.raise_for_status()
             data = resp.json()
 

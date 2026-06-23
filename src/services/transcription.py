@@ -29,9 +29,13 @@ def provider_error_code(exc: Exception) -> str:
         status = exc.response.status_code
         if status == 429:
             return "quota_or_rate_limit"
+        if status == 413:
+            return "payload_too_large"
         if status in (400, 422) and "language" in message:
             return "unsupported_language"
         return f"provider_http_{status}"
+    if "payload too large" in message or "request entity too large" in message:
+        return "payload_too_large"
     if "quota" in message or "rate limit" in message or "too many requests" in message:
         return "quota_or_rate_limit"
     if "language" in message and ("unsupported" in message or "invalid" in message):
@@ -50,6 +54,7 @@ class TranscriptionService:
         content_id: str | None = None,
         transcription_job_id: str | None = None,
         language: str | None = None,
+        media_size_bytes: int | None = None,
         word_timestamps: bool = False,
     ) -> TranscribeResponse:
         model_size = self.stt.model_size
@@ -62,6 +67,9 @@ class TranscriptionService:
                     "provider": self.stt.name,
                     "model": model_size,
                     "language": language,
+                    "metadata": {
+                        "media_size_bytes": media_size_bytes,
+                    } if media_size_bytes is not None else None,
                 },
             )
 
@@ -97,6 +105,7 @@ class TranscriptionService:
             model=model_size,
             segments=[TranscribeSegment(**seg) for seg in result.segments],
             duration_sec=result.duration_sec,
+            media_size_bytes=media_size_bytes,
         )
 
         if content_id:
@@ -116,6 +125,7 @@ class TranscriptionService:
                     "duration_sec": response.duration_sec,
                     "metadata": {
                         "language_probability": response.language_probability,
+                        "media_size_bytes": media_size_bytes,
                     },
                 },
             )
@@ -128,6 +138,7 @@ class TranscriptionService:
         content_id: str | None = None,
         transcription_job_id: str | None = None,
         language: str | None = None,
+        media_size_bytes: int | None = None,
         word_timestamps: bool = False,
     ) -> TranscribeResponse:
         try:
@@ -142,6 +153,9 @@ class TranscriptionService:
                         "model": self.stt.model_size,
                         "error_message": f"media download failed: {exc}",
                         "provider_error_code": "media_download_failed",
+                        "metadata": {
+                            "media_size_bytes": media_size_bytes,
+                        } if media_size_bytes is not None else None,
                     },
                 )
             raise
@@ -151,6 +165,7 @@ class TranscriptionService:
                 content_id=content_id,
                 transcription_job_id=transcription_job_id,
                 language=language,
+                media_size_bytes=media_size_bytes,
                 word_timestamps=word_timestamps,
             )
         finally:
@@ -239,17 +254,23 @@ class TranscriptionService:
             validate_public_url(url)
         except UnsafeURLError as exc:
             raise ValueError(f"Refusing to fetch unsafe URL: {exc}") from exc
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-
         suffix = ".mp3"
         if "." in url.split("/")[-1]:
             suffix = "." + url.split("/")[-1].split(".")[-1].split("?")[0]
 
         fd, path = tempfile.mkstemp(suffix=suffix, dir=TEMP_DIR)
-        with os.fdopen(fd, "wb") as f:
-            f.write(resp.content)
+        os.close(fd)
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream("GET", url) as resp:
+                    resp.raise_for_status()
+                    with open(path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+        except Exception:
+            self._cleanup(path)
+            raise
         return path
 
     @staticmethod

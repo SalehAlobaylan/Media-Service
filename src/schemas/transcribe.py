@@ -23,5 +23,6 @@ class TranscribeResponse(BaseModel):
     model: str | None = None
     segments: list[TranscribeSegment]
     duration_sec: float
+    media_size_bytes: int | None = None
     write_back_status: WriteBackStatus = "not_attempted"
     write_back_error: str | None = None

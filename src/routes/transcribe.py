@@ -73,6 +73,7 @@ async def _mark_transcription_job_failed(
     request: Request,
     transcription_job_id: str | None,
     message: str,
+    media_size_bytes: int | None = None,
 ) -> None:
     if not transcription_job_id:
         return
@@ -86,6 +87,9 @@ async def _mark_transcription_job_failed(
             "model": model_manager.stt.model_size,
             "error_message": message,
             "provider_error_code": "stt_not_ready",
+            "metadata": {
+                "media_size_bytes": media_size_bytes,
+            } if media_size_bytes is not None else None,
         },
     )
 
@@ -98,6 +102,7 @@ async def transcribe(
     content_id: str | None = Form(None),
     transcription_job_id: str | None = Form(None),
     language: str | None = Form(None),
+    media_size_bytes: int | None = Form(None),
     word_timestamps: bool = Form(False),
 ) -> TranscribeResponse:
     settings = request.app.state.settings
@@ -109,7 +114,7 @@ async def transcribe(
 
     if not model_manager.stt.is_loaded:
         await _mark_transcription_job_failed(
-            request, transcription_job_id, "STT engine is not ready"
+            request, transcription_job_id, "STT engine is not ready", media_size_bytes
         )
         raise TranscriptionError("STT engine is not ready")
 
@@ -121,6 +126,7 @@ async def transcribe(
                 request,
                 transcription_job_id,
                 f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB",
+                media_size_bytes,
             )
             raise TranscriptionError(
                 f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB"
@@ -139,6 +145,7 @@ async def transcribe(
                     content_id=content_id,
                     transcription_job_id=transcription_job_id,
                     language=language,
+                    media_size_bytes=media_size_bytes,
                     word_timestamps=word_timestamps,
                 )
             finally:
@@ -153,6 +160,7 @@ async def transcribe(
                 content_id=content_id,
                 transcription_job_id=transcription_job_id,
                 language=language,
+                media_size_bytes=media_size_bytes,
                 word_timestamps=word_timestamps,
             )
 
@@ -184,6 +192,7 @@ async def submit_transcribe_job(
     content_id: str | None = Form(None),
     transcription_job_id: str | None = Form(None),
     language: str | None = Form(None),
+    media_size_bytes: int | None = Form(None),
     word_timestamps: bool = Form(False),
 ) -> JobAcceptedResponse:
     """Enqueue an async transcription job. Use for long-form (>2 min) audio.
@@ -200,6 +209,7 @@ async def submit_transcribe_job(
             request,
             transcription_job_id,
             "Async transcription unavailable: Redis (arq) not reachable",
+            media_size_bytes,
         )
         raise HTTPException(
             status_code=503,
@@ -216,6 +226,7 @@ async def submit_transcribe_job(
                 request,
                 transcription_job_id,
                 f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB",
+                media_size_bytes,
             )
             raise TranscriptionError(
                 f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB"
@@ -263,6 +274,7 @@ async def submit_transcribe_job(
             word_timestamps,
             request_id,
             storage_key,
+            media_size_bytes,
             _job_id=dedupe_id,
         )
         if job is None:
@@ -292,7 +304,7 @@ async def submit_transcribe_job(
             except Exception:
                 pass
         await _mark_transcription_job_failed(
-            request, transcription_job_id, "Failed to enqueue transcription job"
+            request, transcription_job_id, "Failed to enqueue transcription job", media_size_bytes
         )
         raise
 

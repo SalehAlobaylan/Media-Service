@@ -73,6 +73,7 @@ async def transcribe_task(
     word_timestamps: bool,
     request_id: str | None = None,
     storage_key: str | None = None,
+    media_size_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Run transcription. Exactly one of (storage_key, url, audio_path) is set.
 
@@ -139,6 +140,7 @@ async def transcribe_task(
                     content_id=content_id,
                     transcription_job_id=transcription_job_id,
                     language=language,
+                    media_size_bytes=media_size_bytes,
                     word_timestamps=word_timestamps,
                 )
             elif url:
@@ -147,6 +149,7 @@ async def transcribe_task(
                     content_id=content_id,
                     transcription_job_id=transcription_job_id,
                     language=language,
+                    media_size_bytes=media_size_bytes,
                     word_timestamps=word_timestamps,
                 )
             elif audio_path:
@@ -155,6 +158,7 @@ async def transcribe_task(
                     content_id=content_id,
                     transcription_job_id=transcription_job_id,
                     language=language,
+                    media_size_bytes=media_size_bytes,
                     word_timestamps=word_timestamps,
                 )
             else:
@@ -199,6 +203,9 @@ async def transcribe_task(
                     "status": "failed",
                     "error_message": str(exc),
                     "provider_error_code": provider_error_code(exc),
+                    "metadata": {
+                        "media_size_bytes": media_size_bytes,
+                    } if media_size_bytes is not None else None,
                 },
             )
         transcribe_jobs_total.labels(state="failed").inc()
