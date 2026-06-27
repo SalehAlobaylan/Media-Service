@@ -22,6 +22,10 @@ It does **not** run text embeddings, LLM ops, FFmpeg transcoding, pipeline orche
 
 The STT engine sits behind a stable HTTP boundary so it can be swapped (Deepgram, faster-whisper, a Saudi-tuned model, …) without rippling into Aggregation or CMS. Default is **Deepgram Nova-3** (`STT_PROVIDER=deepgram`, chosen for Arabic dialect + code-switching coverage); **faster-whisper** is the local/self-hosted alternative.
 
+## Atomization Transcript Role
+
+Media owns timestamped parent transcripts used by the atomization engine. Aggregation may force STT for >40m atomization candidates that lack a usable transcript. Parent transcripts remain available for provenance, search, and future re-chaptering; child transcript slices are derived downstream and embedded through Enrichment. Media does not plan chapters, cut media, or decide feed visibility.
+
 ## Quick Start
 
 ```bash
@@ -93,7 +97,7 @@ The worker deletes the audio object on success; objects from terminal failures a
 
 **Owns:** audio/image → AI output; writes to CMS via `POST /internal/transcripts`, `PATCH /internal/content-items/:id/transcript`, `PATCH /internal/content-items/:id/image-embedding`.
 
-**Does not own:** text embeddings (Enrichment-Service), retrieval / search (CMS + Enrichment), pipeline orchestration / BullMQ (Aggregation), feed assembly (CMS), FFmpeg transcoding.
+**Does not own:** text embeddings (Enrichment-Service), retrieval / search (CMS + Enrichment), pipeline orchestration / BullMQ (Aggregation), chapter planning (Enrichment), feed assembly/visibility (CMS), FFmpeg transcoding/cutting (Aggregation).
 
 ## Project Structure
 
