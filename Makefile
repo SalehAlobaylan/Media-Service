@@ -19,8 +19,11 @@ ensure-dev: ensure-venv
 		$(VENV_PYTHON) -m pip install --upgrade pip && \
 		$(VENV_PIP) install -r requirements-dev.txt; \
 	}
-	@$(VENV_PYTHON) -m pytest --version >/dev/null 2>&1
-	@$(VENV_PYTHON) -m ruff --version >/dev/null 2>&1
+	@$(VENV_PYTHON) -m pytest --version >/dev/null 2>&1 && \
+		$(VENV_PYTHON) -m ruff --version >/dev/null 2>&1 || { \
+		$(VENV_PYTHON) -m pip install --upgrade pip && \
+		$(VENV_PIP) install -r requirements-dev.txt; \
+	}
 
 run: ensure-runtime
 	$(VENV_PYTHON) -m uvicorn src.main:app --host 0.0.0.0 --port $${PORT:-5051}

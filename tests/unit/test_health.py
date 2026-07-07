@@ -35,6 +35,10 @@ def test_queue_status_not_configured(client) -> None:
         "configured": False,
         "worker_alive": False,
         "queued": 0,
+        "jobs_complete": 0,
+        "jobs_failed": 0,
+        "jobs_retried": 0,
+        "jobs_ongoing": 0,
         "detail": None,
     }
 
