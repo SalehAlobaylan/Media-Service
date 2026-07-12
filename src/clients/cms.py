@@ -120,12 +120,27 @@ class CMSClient:
         self,
         content_id: str,
         embedding: list[float],
+        model: str | None = None,
+        space_id: str | None = None,
+        producer_id: str | None = None,
     ) -> dict[str, Any]:
-        """Persist a 512-dim CLIP image embedding to content_items.image_embedding."""
+        """Persist a 512-dim CLIP image embedding to content_items.image_embedding.
+
+        model/space_id/producer_id are the immutable vector-space identities
+        (stage 10). Sent only when resolved; an unresolved space leaves the row
+        unstamped debt rather than stamping a false-stable identity.
+        """
+        payload: dict[str, Any] = {"embedding": embedding}
+        if model:
+            payload["model"] = model
+        if space_id:
+            payload["space_id"] = space_id
+        if producer_id:
+            payload["producer_id"] = producer_id
         return await self._request(
             "PATCH",
             f"/internal/content-items/{content_id}/image-embedding",
-            json={"embedding": embedding},
+            json=payload,
             metric_label="store_image_embedding",
         )
 

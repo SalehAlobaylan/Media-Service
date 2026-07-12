@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     WHISPER_DEVICE: str = "cpu"
     WHISPER_COMPUTE_TYPE: str = "int8"
     CLIP_MODEL: str = "clip-ViT-B-32"
+    # Immutable CLIP artifact revision (commit digest). Boot-time model config
+    # per Config Discipline, NOT a tuning knob. "" ⇒ auto-resolve from the local
+    # HF snapshot cache; a bare branch label is not a revision and leaves the
+    # image space lifecycle-not-ready (no false-stable identity stamped).
+    CLIP_MODEL_REVISION: str = ""
     MODELS_DIR: str = "./models"
 
     # Media handling — MEDIA_TEMP_DIR empty string means "fall back to

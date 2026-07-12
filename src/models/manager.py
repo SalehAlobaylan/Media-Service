@@ -35,6 +35,7 @@ class ModelManager:
         self.clip = CLIPWrapper(
             model_name=settings.CLIP_MODEL,
             cache_folder=settings.MODELS_DIR,
+            revision=settings.CLIP_MODEL_REVISION,
         )
 
     @property

@@ -26,13 +26,25 @@ def _model_items(model_manager) -> list[ModelInfoItem]:
             type="stt",
             dimensions=None,
         ),
-        ModelInfoItem(
-            name=model_manager.clip.model_name,
-            loaded=model_manager.clip.is_loaded,
-            type="clip",
-            dimensions=model_manager.clip.dimensions if model_manager.clip.is_loaded else None,
-        ),
+        _clip_item(model_manager.clip),
     ]
+
+
+def _clip_item(clip) -> ModelInfoItem:
+    raw_desc = clip.space_descriptor() if clip.is_loaded else {}
+    desc = raw_desc if isinstance(raw_desc, dict) else {}
+    return ModelInfoItem(
+        name=clip.model_name,
+        loaded=clip.is_loaded,
+        type="clip",
+        dimensions=clip.dimensions if clip.is_loaded else None,
+        revision=desc.get("revision"),
+        normalized=desc.get("normalized"),
+        pooling=desc.get("pooling"),
+        space_id=desc.get("space_id"),
+        producer_recipe=desc.get("producer_recipe"),
+        producer_id=desc.get("producer_id"),
+    )
 
 
 @router.get("/health", response_model=HealthResponse)

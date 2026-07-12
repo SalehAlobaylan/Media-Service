@@ -27,6 +27,14 @@ MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 DOWNLOAD_TIMEOUT_SEC = 30
 
 
+def _space_descriptor(clip: CLIPWrapper) -> dict:
+    factory = getattr(clip, "space_descriptor", None)
+    if not callable(factory):
+        return {}
+    descriptor = factory()
+    return descriptor if isinstance(descriptor, dict) else {}
+
+
 class ImageEmbeddingService:
     def __init__(self, clip: CLIPWrapper, cms_client: CMSClient):
         self.clip = clip
@@ -51,6 +59,7 @@ class ImageEmbeddingService:
         vector = await asyncio.to_thread(self.clip.encode_image, image)
         image_embeddings_total.labels(status="success").inc()
 
+        descriptor = _space_descriptor(self.clip)
         response = ImageEmbedResponse(
             embedding=vector,
             model=self.clip.model_name,
@@ -58,7 +67,7 @@ class ImageEmbeddingService:
         )
 
         if content_id:
-            status, error = await self._write_back(content_id, vector)
+            status, error = await self._write_back(content_id, vector, descriptor)
             response.write_back_status = status
             response.write_back_error = error
 
@@ -104,10 +113,16 @@ class ImageEmbeddingService:
                 return buf.getvalue()
 
     async def _write_back(
-        self, content_id: str, vector: list[float]
+        self, content_id: str, vector: list[float], descriptor: dict | None = None
     ) -> tuple[str, str | None]:
         try:
-            await self.cms_client.store_image_embedding(content_id, vector)
+            await self.cms_client.store_image_embedding(
+                content_id,
+                vector,
+                model=descriptor.get("model") if descriptor else None,
+                space_id=descriptor.get("space_id") if descriptor else None,
+                producer_id=descriptor.get("producer_id") if descriptor else None,
+            )
             logger.info("image_embedding_writeback_complete", content_id=content_id)
             return "ok", None
         except Exception as exc:

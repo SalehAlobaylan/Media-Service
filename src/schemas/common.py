@@ -20,6 +20,14 @@ class ModelInfoItem(BaseModel):
     loaded: bool
     type: str
     dimensions: int | None = None
+    # Immutable vector-space descriptor (stage 10). Present on the clip item;
+    # absent/None on stt (no vector space). "" revision/space_id ⇒ not ready.
+    revision: str | None = None
+    normalized: bool | None = None
+    pooling: str | None = None
+    space_id: str | None = None
+    producer_recipe: str | None = None
+    producer_id: str | None = None
 
 
 class ReadyResponse(BaseModel):

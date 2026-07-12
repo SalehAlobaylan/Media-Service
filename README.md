@@ -66,6 +66,7 @@ Long audio doesn't block the API: `POST /v1/transcribe/jobs` streams the upload 
 | `WHISPER_MODEL_SIZE` | no | base | faster-whisper model size |
 | `WHISPER_DEVICE` / `WHISPER_COMPUTE_TYPE` | no | cpu / int8 | Whisper runtime |
 | `CLIP_MODEL` | no | clip-ViT-B-32 | Image embedder selector |
+| `CLIP_MODEL_REVISION` | no | empty | Immutable model commit; empty auto-resolves the loaded snapshot for lifecycle provenance |
 | `MODELS_DIR` | no | ./models | Model cache dir |
 | `MEDIA_TEMP_DIR` | no | system tmp | Per-process temp dir (not shared between API/worker) |
 | `MAX_UPLOAD_MB` | no | 200 | Upload cap |
