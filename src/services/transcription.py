@@ -1,23 +1,20 @@
 import asyncio
+import inspect
 import os
 import tempfile
 
 import httpx
 
 from src.clients.cms import CMSClient
+from src.clients.safe_fetch import SafeFetchClient
 from src.providers.base import STTProvider
+from src.services.workload import WorkloadAdmission
 from src.schemas.transcribe import TranscribeResponse, TranscribeSegment
 from src.utils.logging import get_logger
 from src.utils.metrics import transcription_duration, transcriptions_total
 from src.utils.url_guard import UnsafeURLError, validate_public_url
 
 logger = get_logger(__name__)
-
-# MEDIA_TEMP_DIR is the shared spool path between the FastAPI process (where
-# uploads land) and the arq worker process (which reads them). Empty / unset
-# falls back to the system tempdir so dev works without extra config.
-TEMP_DIR = os.environ.get("MEDIA_TEMP_DIR") or tempfile.gettempdir()
-
 
 def provider_error_code(exc: Exception) -> str:
     message = str(exc).lower()
@@ -43,10 +40,35 @@ def provider_error_code(exc: Exception) -> str:
     return "provider_error"
 
 
+def is_retryable_transcript_delivery_error(exc: Exception) -> bool:
+    """Whether a CMS transcript delivery can be safely retried by this caller.
+
+    This does not make creation idempotent; the CMS delivery-key contract is
+    still required before retries can be relied on for lost responses. Until
+    then, never retry deterministic auth, validation, not-found, or conflict
+    responses that could only repeat a rejected mutation.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
+
+
 class TranscriptionService:
-    def __init__(self, stt: STTProvider, cms_client: CMSClient):
+    def __init__(
+        self,
+        stt: STTProvider,
+        cms_client: CMSClient,
+        temp_dir: str | None = None,
+        fetch_client: SafeFetchClient | None = None,
+        max_download_bytes: int = 200 * 1024 * 1024,
+        admission: WorkloadAdmission | None = None,
+    ):
         self.stt = stt
         self.cms_client = cms_client
+        self.temp_dir = temp_dir or tempfile.gettempdir()
+        self.fetch_client = fetch_client or SafeFetchClient()
+        self.max_download_bytes = max_download_bytes
+        self.admission = admission or WorkloadAdmission()
 
     async def transcribe_file(
         self,
@@ -74,13 +96,20 @@ class TranscriptionService:
             )
 
         try:
-            with transcription_duration.labels(model_size=model_size).time():
-                result = await asyncio.to_thread(
-                    self.stt.transcribe,
-                    audio_path,
-                    language=language,
-                    word_timestamps=word_timestamps,
-                )
+            async with self.admission.acquire("stt"):
+                with transcription_duration.labels(model_size=model_size).time():
+                    transcribe_async = getattr(self.stt, "transcribe_async", None)
+                    if inspect.iscoroutinefunction(transcribe_async):
+                        result = await transcribe_async(
+                            audio_path, language=language, word_timestamps=word_timestamps
+                        )
+                    else:
+                        result = await asyncio.to_thread(
+                            self.stt.transcribe,
+                            audio_path,
+                            language=language,
+                            word_timestamps=word_timestamps,
+                        )
         except Exception as exc:
             if transcription_job_id:
                 await self._update_job(
@@ -205,15 +234,17 @@ class TranscriptionService:
                 logger.info("transcript_writeback_complete", content_id=content_id)
                 return "ok", None
             except Exception as exc:
-                last_error = str(exc)
+                last_error = provider_error_code(exc)
                 logger.warning(
                     "transcript_writeback_attempt_failed",
                     content_id=content_id,
                     attempt=attempt + 1,
-                    error=last_error,
+                    error_code=last_error,
                 )
-                if attempt == 0:
+                if attempt == 0 and is_retryable_transcript_delivery_error(exc):
                     await asyncio.sleep(1.0)
+                    continue
+                break
 
         logger.error(
             "transcript_writeback_failed",
@@ -258,16 +289,15 @@ class TranscriptionService:
         if "." in url.split("/")[-1]:
             suffix = "." + url.split("/")[-1].split(".")[-1].split("?")[0]
 
-        fd, path = tempfile.mkstemp(suffix=suffix, dir=TEMP_DIR)
+        fd, path = tempfile.mkstemp(suffix=suffix, dir=self.temp_dir)
         os.close(fd)
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                async with client.stream("GET", url) as resp:
-                    resp.raise_for_status()
-                    with open(path, "wb") as f:
-                        async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
-                            if chunk:
-                                f.write(chunk)
+            await self.fetch_client.download_to_path(
+                url,
+                path,
+                self.max_download_bytes,
+                ("audio/", "video/mp4", "video/webm"),
+            )
         except Exception:
             self._cleanup(path)
             raise

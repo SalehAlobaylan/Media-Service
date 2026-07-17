@@ -25,12 +25,13 @@ def _model_items(model_manager) -> list[ModelInfoItem]:
             loaded=model_manager.stt.is_loaded,
             type="stt",
             dimensions=None,
+            readiness_reason=model_manager.stt_readiness_reason,
         ),
-        _clip_item(model_manager.clip),
+        _clip_item(model_manager.clip, model_manager.clip_readiness_reason),
     ]
 
 
-def _clip_item(clip) -> ModelInfoItem:
+def _clip_item(clip, readiness_reason: str | None = None) -> ModelInfoItem:
     raw_desc = clip.space_descriptor() if clip.is_loaded else {}
     desc = raw_desc if isinstance(raw_desc, dict) else {}
     return ModelInfoItem(
@@ -44,6 +45,7 @@ def _clip_item(clip) -> ModelInfoItem:
         space_id=desc.get("space_id"),
         producer_recipe=desc.get("producer_recipe"),
         producer_id=desc.get("producer_id"),
+        readiness_reason=readiness_reason,
     )
 
 
@@ -100,16 +102,33 @@ async def queue_status(request: Request) -> QueueStatusResponse:
     queue via its arq pool. `worker_alive` is the presence of arq's health-check
     key, which the worker refreshes every WorkerSettings.health_check_interval.
     """
-    pool = getattr(request.app.state, "arq_pool", None)
+    manager = getattr(request.app.state, "queue_manager", None)
+    pool = await manager.get_pool() if manager is not None else getattr(request.app.state, "arq_pool", None)
     if pool is None:
-        return QueueStatusResponse(configured=False, worker_alive=False, queued=0)
+        settings = request.app.state.settings
+        return QueueStatusResponse(
+            configured=bool(settings.REDIS_URL),
+            reachable=False,
+            worker_alive=False,
+            queued=0,
+        )
 
+    reachable = True
     try:
         queued = int(await pool.zcard(_ARQ_QUEUE_KEY) or 0)
     except Exception:
+        reachable = False
+        if manager is not None:
+            await manager.mark_unavailable(pool)
         queued = 0
 
-    health = await pool.get(_ARQ_HEALTH_KEY)
+    try:
+        health = await pool.get(_ARQ_HEALTH_KEY)
+    except Exception:
+        reachable = False
+        if manager is not None:
+            await manager.mark_unavailable(pool)
+        health = None
     detail = health.decode() if isinstance(health, bytes) else health
 
     complete = failed = retried = ongoing = 0
@@ -120,6 +139,7 @@ async def queue_status(request: Request) -> QueueStatusResponse:
 
     return QueueStatusResponse(
         configured=True,
+        reachable=reachable,
         worker_alive=health is not None,
         queued=queued,
         jobs_complete=complete,

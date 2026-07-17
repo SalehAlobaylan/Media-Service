@@ -62,3 +62,16 @@ class STTProvider(ABC):
     ) -> TranscribeResult:
         """Transcribe a local audio file. Synchronous — the service runs it in a
         thread. Returns the shared TranscribeResult."""
+
+    async def transcribe_async(
+        self, audio_path: str, language: str | None = None, word_timestamps: bool = False
+    ) -> TranscribeResult:
+        """Hosted providers override this; legacy local providers remain sync."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.transcribe, audio_path, language=language, word_timestamps=word_timestamps
+        )
+
+    async def aclose(self) -> None:
+        return None

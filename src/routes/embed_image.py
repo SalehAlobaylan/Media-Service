@@ -8,6 +8,8 @@ Plus optional `content_id` for CMS write-back. Returns a 512-dim vector.
 """
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
 from src.auth.service_auth import verify_service_token
@@ -33,10 +35,25 @@ async def embed_image(
 ) -> ImageEmbedResponse:
     model_manager = request.app.state.model_manager
     cms_client = request.app.state.cms_client
-    service = ImageEmbeddingService(model_manager.clip, cms_client)
+    service = ImageEmbeddingService(
+        model_manager.clip,
+        cms_client,
+        getattr(request.app.state, "fetch_client", None),
+        getattr(request.app.state, "workload_admission", None),
+    )
 
     if not model_manager.clip.is_loaded:
         raise ImageEmbeddingError("CLIP model is not loaded")
+
+    has_file = bool(image_file and image_file.filename)
+    has_url = bool(url and url.strip())
+    if has_file == has_url:
+        raise ImageEmbeddingError("Provide exactly one of image_file or url")
+    if content_id:
+        try:
+            UUID(content_id)
+        except ValueError as exc:
+            raise ImageEmbeddingError("Invalid content_id") from exc
 
     if image_file is not None:
         content_length = request.headers.get("content-length")
@@ -51,7 +68,7 @@ async def embed_image(
             )
 
     try:
-        if image_file is not None and image_file.filename:
+        if has_file and image_file is not None:
             data = await image_file.read()
             if len(data) > IMAGE_UPLOAD_MAX_BYTES:
                 raise ImageEmbeddingError(
@@ -59,16 +76,15 @@ async def embed_image(
                     f"{IMAGE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB"
                 )
             return await service.embed_bytes(data, content_id=content_id)
-        if url:
+        if has_url and url is not None:
             return await service.embed_url(url, content_id=content_id)
-        raise ImageEmbeddingError("Provide either 'image_file' or 'url'")
     except ImageEmbeddingError:
         raise
     except ValueError as exc:
         # Bad image / oversize download — 4xx, not 5xx.
         image_embeddings_total.labels(status="failure").inc()
-        raise ImageEmbeddingError(str(exc)) from exc
+        raise ImageEmbeddingError("Invalid image input") from exc
     except Exception as exc:
         image_embeddings_total.labels(status="failure").inc()
-        logger.error("image_embedding_failed", error=str(exc))
-        raise ImageEmbeddingError(f"Image embedding failed: {exc}") from exc
+        logger.error("image_embedding_failed", error_code="image_embedding_failed")
+        raise ImageEmbeddingError("Image embedding failed") from exc

@@ -50,6 +50,7 @@ COPY src ./src
 # No EXPOSE / PORT: the worker has no HTTP listener. No HTTP HEALTHCHECK for
 # the same reason — Cranl monitors process liveness; if the arq process exits,
 # the container exits and Cranl restarts it.
-ENV MODELS_DIR=/app/models
+ENV MODELS_DIR=/app/models \
+    MEDIA_ROLE=worker
 
 CMD ["python", "-m", "arq", "src.worker.WorkerSettings"]

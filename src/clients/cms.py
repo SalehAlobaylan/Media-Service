@@ -22,6 +22,13 @@ from src.utils.metrics import cms_writeback_total
 logger = get_logger(__name__)
 
 
+def _is_countable_cms_failure(exc: Exception) -> bool:
+    """Only CMS availability failures can open persistence's breaker."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    return isinstance(exc, httpx.HTTPError)
+
+
 class CMSClient:
     def __init__(self, settings: Settings):
         raw_base_url = settings.CMS_BASE_URL.rstrip("/")
@@ -31,7 +38,7 @@ class CMSClient:
             if raw_base_url.endswith("/internal")
             else raw_base_url
         )
-        self.token = settings.CMS_SERVICE_TOKEN
+        self.token = settings.cms_writeback_token
         self.circuit_breaker = CircuitBreaker(
             failure_threshold=settings.CB_FAILURE_THRESHOLD,
             reset_timeout_sec=settings.CB_RESET_TIMEOUT_SEC,
@@ -176,7 +183,9 @@ class CMSClient:
             return resp.json()
 
         try:
-            result = await self.circuit_breaker.execute(_do_request)
+            result = await self.circuit_breaker.execute(
+                _do_request, count_failure=_is_countable_cms_failure
+            )
             cms_writeback_total.labels(endpoint=metric_label, status="success").inc()
             return result
         except Exception as exc:

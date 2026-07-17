@@ -27,12 +27,14 @@ def test_ready_reports_models_and_cms(client) -> None:
     assert body["dependencies"]["cms"] is True
 
 
-def test_queue_status_not_configured(client) -> None:
-    # conftest sets app.state.arq_pool = None — the arq pool isn't wired.
+def test_queue_status_configured_but_unreachable(client) -> None:
+    # conftest sets app.state.arq_pool = None — Redis is configured but its
+    # lifecycle connection is not currently reachable.
     r = client.get("/health/queue")
     assert r.status_code == 200
     assert r.json() == {
-        "configured": False,
+        "configured": True,
+        "reachable": False,
         "worker_alive": False,
         "queued": 0,
         "jobs_complete": 0,
@@ -59,6 +61,7 @@ def test_queue_status_worker_alive_parses_counts(client) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["configured"] is True
+    assert body["reachable"] is True
     assert body["worker_alive"] is True
     assert body["queued"] == 3
     assert body["jobs_complete"] == 10
@@ -83,6 +86,7 @@ def test_queue_status_worker_down(client) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["configured"] is True
+    assert body["reachable"] is True
     assert body["worker_alive"] is False
     assert body["queued"] == 0
     assert body["detail"] is None

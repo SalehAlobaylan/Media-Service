@@ -1,3 +1,5 @@
+import hmac
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,12 +12,18 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "info"
     WORKERS: int = 1
 
-    # Auth — same fallback chain as Enrichment-Service so a single shared
-    # SERVICE_AUTH_TOKEN in .env.local works for both services.
+    # Inbound auth is deliberately separate from the token used to mutate CMS.
+    # SERVICE_AUTH_TOKEN is retained as a documented legacy inbound alias for
+    # local stacks; it never grants CMS access by itself.
     SERVICE_AUTH_TOKEN: str = ""
     MEDIA_SERVICE_TOKEN: str = ""
+    MEDIA_SERVICE_TOKEN_PREVIOUS: str = ""
+    # Dedicated outbound CMS identity. CMS_SERVICE_TOKEN is retained only for
+    # local and migration compatibility.
+    CMS_MEDIA_SERVICE_TOKEN: str = ""
     CMS_SERVICE_TOKEN: str = ""
     CMS_BASE_URL: str = "http://localhost:8080"
+    MEDIA_ROLE: str = "api"
 
     # STT engine selector (boot-time infra selector — Config Discipline). The
     # toggle/budget that govern WHEN STT runs live in the CMS transcription_config
@@ -87,32 +95,76 @@ class Settings(BaseSettings):
         return self.ENV == "production"
 
     @property
-    def service_auth_token(self) -> str:
-        """Resolution order mirrors Enrichment-Service. The shared
-        SERVICE_AUTH_TOKEN in .env.local always wins; the per-service
-        var is a per-deployment override; CMS_SERVICE_TOKEN is a final
-        fallback for ops who only configured one token."""
-        return (
-            self.SERVICE_AUTH_TOKEN
-            or self.MEDIA_SERVICE_TOKEN
-            or self.CMS_SERVICE_TOKEN
+    def inbound_service_tokens(self) -> tuple[str, ...]:
+        """Current and optional previous inbound tokens, without duplicates."""
+        tokens = tuple(
+            token
+            for token in (
+                self.MEDIA_SERVICE_TOKEN or self.SERVICE_AUTH_TOKEN,
+                self.MEDIA_SERVICE_TOKEN_PREVIOUS,
+            )
+            if token
         )
+        if tokens or self.is_production:
+            return tokens
+        # Local-only convenience. Production must never inherit CMS mutation
+        # authority for inbound requests.
+        return (self.CMS_SERVICE_TOKEN,) if self.CMS_SERVICE_TOKEN else ()
 
-    def validate_startup(self) -> tuple[list[str], list[str]]:
+    @property
+    def service_auth_token(self) -> str:
+        """Primary inbound token retained for existing callers."""
+        return self.inbound_service_tokens[0] if self.inbound_service_tokens else ""
+
+    @property
+    def cms_writeback_token(self) -> str:
+        return self.CMS_MEDIA_SERVICE_TOKEN or self.CMS_SERVICE_TOKEN
+
+    @property
+    def s3_partially_configured(self) -> bool:
+        values = (
+            self.S3_ENDPOINT_URL,
+            self.S3_BUCKET,
+            self.S3_ACCESS_KEY_ID,
+            self.S3_SECRET_ACCESS_KEY,
+        )
+        return any(values) and not all(values)
+
+    def validate_startup(self, expected_role: str | None = None) -> tuple[list[str], list[str]]:
         """Return (fatal_errors, warnings).
 
-        In production the auth token must be set, otherwise Aggregation
-        can't authenticate against this service. In dev we downgrade to
-        a warning so local stacks can boot without explicit token setup.
+        Roles are explicit so an API image cannot accidentally consume jobs and
+        a worker cannot report API-grade readiness. Production additionally
+        requires separate inbound and CMS credentials. Development may use the
+        CMS token as an inbound convenience only when no dedicated token exists.
         """
         errors: list[str] = []
         warnings: list[str] = []
 
-        if not self.service_auth_token:
-            msg = (
-                "SERVICE_AUTH_TOKEN (or MEDIA_SERVICE_TOKEN / "
-                "CMS_SERVICE_TOKEN) must be set"
-            )
+        if self.MEDIA_ROLE not in {"api", "worker"}:
+            errors.append("MEDIA_ROLE must be one of: api, worker")
+        elif expected_role and self.MEDIA_ROLE != expected_role:
+            errors.append(f"MEDIA_ROLE must be {expected_role} for this process")
+
+        primary_inbound = self.MEDIA_SERVICE_TOKEN or self.SERVICE_AUTH_TOKEN
+        if not primary_inbound:
+            msg = "MEDIA_SERVICE_TOKEN (or legacy SERVICE_AUTH_TOKEN) must be set"
             (errors if self.is_production else warnings).append(msg)
+
+        if self.is_production and not self.CMS_MEDIA_SERVICE_TOKEN:
+            errors.append("CMS_MEDIA_SERVICE_TOKEN must be set in production")
+
+        if (
+            self.is_production
+            and primary_inbound
+            and self.CMS_MEDIA_SERVICE_TOKEN
+            and hmac.compare_digest(primary_inbound, self.CMS_MEDIA_SERVICE_TOKEN)
+        ):
+            errors.append(
+                "MEDIA_SERVICE_TOKEN/SERVICE_AUTH_TOKEN must differ from CMS_MEDIA_SERVICE_TOKEN in production"
+            )
+
+        if self.s3_partially_configured:
+            errors.append("S3 configuration must be either complete or entirely unset")
 
         return errors, warnings

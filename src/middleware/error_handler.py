@@ -2,6 +2,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from src.utils.logging import get_logger
+from src.services.workload import WorkloadOverloadedError
 
 logger = get_logger(__name__)
 
@@ -33,11 +34,24 @@ async def global_error_handler(request: Request, exc: Exception) -> JSONResponse
             },
         )
 
+    if isinstance(exc, WorkloadOverloadedError):
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": "1"},
+            content={
+                "error": "Media workload is temporarily saturated",
+                "error_code": "WORKLOAD_OVERLOADED",
+                "retryable": True,
+                "retry_after_seconds": 1,
+                "request_id": request_id,
+            },
+        )
+
     if isinstance(exc, TranscriptionError):
         return JSONResponse(
             status_code=422,
             content={
-                "error": str(exc),
+                "error": "Transcription request failed",
                 "error_code": "TRANSCRIPTION_FAILED",
                 "retryable": False,
                 "request_id": request_id,
@@ -48,7 +62,7 @@ async def global_error_handler(request: Request, exc: Exception) -> JSONResponse
         return JSONResponse(
             status_code=422,
             content={
-                "error": str(exc),
+                "error": "Image embedding request failed",
                 "error_code": "IMAGE_EMBEDDING_FAILED",
                 "retryable": False,
                 "request_id": request_id,

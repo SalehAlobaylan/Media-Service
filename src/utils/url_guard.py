@@ -53,12 +53,20 @@ def validate_public_url(url: str) -> str:
     if not host:
         raise UnsafeURLError("URL has no host")
 
+    if parsed.username or parsed.password:
+        raise UnsafeURLError("URL userinfo is not allowed")
+    validate_public_host(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    return url
+
+
+def validate_public_host(host: str, port: int) -> str:
+    """Resolve and select a public address for the imminent TCP connection."""
     try:
-        infos = socket.getaddrinfo(host, parsed.port or None, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise UnsafeURLError(f"could not resolve host '{host}'") from exc
 
-    resolved = {info[4][0] for info in infos}
+    resolved = sorted({info[4][0] for info in infos})
     if not resolved:
         raise UnsafeURLError(f"could not resolve host '{host}'")
 
@@ -68,4 +76,9 @@ def validate_public_url(url: str) -> str:
                 f"host '{host}' resolves to non-public address {ip}"
             )
 
-    return url
+    return resolved[0]
+
+
+def safe_url_host(url: str) -> str:
+    """A log-safe source label that never includes paths, userinfo, or queries."""
+    return urlparse(url).hostname or "invalid-host"

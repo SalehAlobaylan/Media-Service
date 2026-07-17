@@ -32,7 +32,7 @@ dev: ensure-dev
 	$(VENV_PYTHON) -m uvicorn src.main:app --host 0.0.0.0 --port $${PORT:-5051} --reload
 
 worker: ensure-runtime
-	$(VENV_PYTHON) -m arq src.worker.WorkerSettings
+	MEDIA_ROLE=worker $(VENV_PYTHON) -m arq src.worker.WorkerSettings
 
 install: ensure-venv
 	$(VENV_PYTHON) -m pip install --upgrade pip
@@ -49,8 +49,10 @@ test-unit: ensure-dev
 	$(VENV_PYTHON) -m pytest tests/unit/ -v
 
 test-coverage: ensure-dev
-	$(VENV_PYTHON) -m coverage run -m pytest tests/ -v
-	$(VENV_PYTHON) -m coverage report -m
+	$(VENV_PYTHON) -m pytest --collect-only -q tests/ | tee /tmp/media-pytest-collection.txt
+	@rg -q '[1-9][0-9]* tests collected' /tmp/media-pytest-collection.txt
+	$(VENV_PYTHON) -m coverage run --source=src --branch -m pytest -ra tests/ -v
+	$(VENV_PYTHON) -m coverage report -m --fail-under=45
 	$(VENV_PYTHON) -m coverage html
 
 lint: ensure-dev

@@ -42,12 +42,43 @@ class ModelManager:
     def is_ready(self) -> dict[str, bool]:
         return {
             "stt": self.stt.is_loaded,
-            "clip": self.clip.is_loaded,
+            "clip": self.clip_ready,
         }
 
     @property
+    def clip_ready(self) -> bool:
+        return self.clip_readiness_reason is None
+
+    @property
+    def clip_readiness_reason(self) -> str | None:
+        if not self.clip.is_loaded or self.clip.dimensions != 512:
+            return "CLIP must be loaded with 512 dimensions"
+        descriptor = self.clip.space_descriptor()
+        if not isinstance(descriptor, dict):
+            return "CLIP descriptor is unavailable"
+        required = {
+            "model": self.clip.model_name,
+            "revision": None,
+            "dimensions": 512,
+            "normalized": True,
+            "space_id": None,
+            "producer_id": None,
+        }
+        for field, expected in required.items():
+            value = descriptor.get(field)
+            if expected is None and not value:
+                return f"CLIP descriptor {field} is unresolved"
+            if expected is not None and value != expected:
+                return f"CLIP descriptor {field} is invalid"
+        return None
+
+    @property
+    def stt_readiness_reason(self) -> str | None:
+        return None if self.stt.is_loaded else "STT provider is not ready"
+
+    @property
     def all_ready(self) -> bool:
-        return self.stt.is_loaded and self.clip.is_loaded
+        return self.stt.is_loaded and self.clip_ready
 
     async def warmup(self, models: list[str] | None = None) -> None:
         """Load models concurrently.

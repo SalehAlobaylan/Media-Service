@@ -7,6 +7,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.clients.cms import CMSClient
 from src.clients.storage import StorageClient
+from src.clients.safe_fetch import SafeFetchClient
 from src.config import Settings
 from src.middleware.error_handler import (
     CircuitOpenError,
@@ -14,11 +15,15 @@ from src.middleware.error_handler import (
     TranscriptionError,
     global_error_handler,
 )
+from src.middleware.body_limit import RequestBodyLimitMiddleware
 from src.middleware.logging import LoggingMiddleware
 from src.middleware.request_id import RequestIDMiddleware
 from src.models.manager import ModelManager
+from src.queue import ArqPoolManager
 from src.routes import embed_image, health, transcribe
+from src.services.workload import WorkloadAdmission
 from src.utils.logging import get_logger, setup_logging
+from src.utils.tempdir import resolve_media_temp_dir
 
 
 @asynccontextmanager
@@ -29,7 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("starting", port=settings.PORT, env=settings.ENV)
 
-    config_errors, config_warnings = settings.validate_startup()
+    config_errors, config_warnings = settings.validate_startup(expected_role="api")
     for warn in config_warnings:
         logger.warning("config_warning", error=warn)
     if config_errors:
@@ -43,25 +48,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     model_manager = ModelManager(settings)
     cms_client = CMSClient(settings)
     storage_client = StorageClient(settings)
+    fetch_client = SafeFetchClient()
+    admission = WorkloadAdmission()
+    temp_dir = resolve_media_temp_dir(settings.MEDIA_TEMP_DIR)
 
-    # arq pool for enqueueing async transcription jobs. Same Redis as the
-    # rest of the platform, db=2 by convention. A flaky/missing Redis must
-    # NOT block boot — async endpoints will return 503 until reachable, but
-    # sync /v1/transcribe and /v1/embed/image still work.
-    arq_pool = None
-    try:
-        from arq import create_pool
+    # Redis is optional for synchronous work. The manager reconnects with
+    # bounded backoff, so async submission recovers after a down-at-boot Redis
+    # without restarting the API process.
+    queue_manager = ArqPoolManager(settings)
+    await queue_manager.start()
+    arq_pool = queue_manager.pool
 
-        from src.worker import _build_redis_settings
-
-        arq_pool = await create_pool(_build_redis_settings())
-        logger.info("arq_pool_ready", db=settings.ARQ_REDIS_DB)
-    except Exception as exc:
-        logger.warning(
-            "arq_pool_disabled",
-            reason=str(exc),
-            hint="Async transcription endpoints will return 503 until Redis is reachable",
-        )
+    if arq_pool is not None and storage_client.is_configured:
+        try:
+            reclaimed = await transcribe.sweep_orphaned_spools(storage_client, arq_pool)
+            if reclaimed:
+                logger.info("transcribe_spool_sweep_complete", reclaimed=reclaimed)
+        except Exception as exc:
+            logger.warning("transcribe_spool_sweep_failed", reason=str(exc))
 
     await model_manager.warmup()
 
@@ -69,17 +73,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.model_manager = model_manager
     app.state.cms_client = cms_client
     app.state.arq_pool = arq_pool
+    app.state.queue_manager = queue_manager
     app.state.storage_client = storage_client
+    app.state.temp_dir = temp_dir
+    app.state.fetch_client = fetch_client
+    app.state.workload_admission = admission
 
     logger.info("ready", models=model_manager.is_ready)
     yield
 
     await cms_client.close()
-    if arq_pool is not None:
-        try:
-            await arq_pool.aclose()
-        except Exception:
-            pass
+    await fetch_client.aclose()
+    await model_manager.stt.aclose()
+    admission.shutdown()
+    await queue_manager.aclose()
     logger.info("shutdown_complete")
 
 
@@ -89,6 +96,13 @@ app = FastAPI(
     "(hosted transcription, CLIP image embedding, future OCR/video).",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# Multipart framing adds a small bounded overhead beyond the media-byte cap.
+_body_limit_settings = Settings()
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_bytes=(_body_limit_settings.MAX_UPLOAD_MB * 1024 * 1024) + (1024 * 1024),
 )
 
 # CORS — read from env at import time. Defaults are dev-friendly; production

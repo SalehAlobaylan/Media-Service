@@ -24,6 +24,8 @@ def mock_model_manager() -> MagicMock:
     manager = MagicMock()
     manager.is_ready = {"stt": True, "clip": True}
     manager.all_ready = True
+    manager.stt_readiness_reason = None
+    manager.clip_readiness_reason = None
 
     # Active STT provider mock (Deepgram-shaped)
     manager.stt.is_loaded = True
@@ -68,4 +70,5 @@ def client(
     app.state.model_manager = mock_model_manager
     app.state.cms_client = mock_cms_client
     app.state.arq_pool = None  # async transcribe endpoints will 503 in tests
+    app.state.queue_manager = None
     return TestClient(app, raise_server_exceptions=False)

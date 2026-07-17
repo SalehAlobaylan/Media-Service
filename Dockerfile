@@ -43,7 +43,8 @@ RUN mkdir -p /app/models && python scripts/download_models.py --output /app/mode
 COPY src ./src
 
 ENV MODELS_DIR=/app/models \
-    PORT=5051
+    PORT=5051 \
+    MEDIA_ROLE=api
 
 EXPOSE 5051
 

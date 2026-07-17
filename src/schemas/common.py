@@ -28,6 +28,7 @@ class ModelInfoItem(BaseModel):
     space_id: str | None = None
     producer_recipe: str | None = None
     producer_id: str | None = None
+    readiness_reason: str | None = None
 
 
 class ReadyResponse(BaseModel):
@@ -44,11 +45,12 @@ class QueueStatusResponse(BaseModel):
     """Async-transcription worker + queue health.
 
     The arq worker is a separate deployment with no HTTP port; the API reports
-    on it by observing the shared Redis (db=2) queue. `configured` is False when
-    the arq pool isn't wired (e.g. Redis unreachable at boot).
+    on it by observing the shared Redis (db=2) queue. `configured` means a
+    Redis DSN exists; `reachable` reports the lifecycle-managed connection.
     """
 
     configured: bool
+    reachable: bool = False
     worker_alive: bool
     queued: int
     # Cumulative worker throughput, parsed from arq's health-check record

@@ -7,24 +7,27 @@ transcribe write-back.
 """
 from __future__ import annotations
 
-import asyncio
 from io import BytesIO
+import warnings
 
-import httpx
 from PIL import Image
 
 from src.clients.cms import CMSClient
+from src.clients.safe_fetch import SafeFetchClient
 from src.models.clip import CLIPWrapper
+from src.services.workload import WorkloadAdmission
 from src.schemas.embed_image import ImageEmbedResponse
 from src.utils.logging import get_logger
 from src.utils.metrics import image_embeddings_total
-from src.utils.url_guard import UnsafeURLError, validate_public_url
 
 logger = get_logger(__name__)
 
 # Cap downloaded images to ~50 MB so a bogus URL can't OOM the worker.
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 DOWNLOAD_TIMEOUT_SEC = 30
+MAX_IMAGE_PIXELS = 24_000_000
+MAX_IMAGE_DIMENSION = 8_192
+ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 
 
 def _space_descriptor(clip: CLIPWrapper) -> dict:
@@ -35,10 +38,27 @@ def _space_descriptor(clip: CLIPWrapper) -> dict:
     return descriptor if isinstance(descriptor, dict) else {}
 
 
+def _is_writable_clip_descriptor(clip: CLIPWrapper, descriptor: dict) -> bool:
+    return bool(
+        clip.dimensions == 512
+        and descriptor.get("model") == clip.model_name
+        and descriptor.get("revision")
+        and descriptor.get("dimensions") == 512
+        and descriptor.get("normalized") is True
+        and descriptor.get("space_id")
+        and descriptor.get("producer_id")
+    )
+
+
 class ImageEmbeddingService:
-    def __init__(self, clip: CLIPWrapper, cms_client: CMSClient):
+    def __init__(
+        self, clip: CLIPWrapper, cms_client: CMSClient, fetch_client: SafeFetchClient | None = None,
+        admission: WorkloadAdmission | None = None,
+    ):
         self.clip = clip
         self.cms_client = cms_client
+        self.fetch_client = fetch_client or SafeFetchClient()
+        self.admission = admission or WorkloadAdmission()
 
     async def embed_bytes(
         self,
@@ -50,13 +70,31 @@ class ImageEmbeddingService:
             raise RuntimeError("CLIP model is not loaded")
 
         try:
-            image = Image.open(BytesIO(image_bytes)).convert("RGB")
+            # Treat Pillow's decompression-bomb warning as a hard rejection;
+            # validate metadata before RGB conversion allocates a pixel buffer.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(BytesIO(image_bytes)) as decoded:
+                    if decoded.format not in ALLOWED_IMAGE_FORMATS:
+                        raise ValueError("Unsupported image format")
+                    if getattr(decoded, "n_frames", 1) != 1:
+                        raise ValueError("Animated images are not supported")
+                    width, height = decoded.size
+                    if (
+                        width <= 0
+                        or height <= 0
+                        or width > MAX_IMAGE_DIMENSION
+                        or height > MAX_IMAGE_DIMENSION
+                        or width * height > MAX_IMAGE_PIXELS
+                    ):
+                        raise ValueError("Image dimensions exceed the allowed limit")
+                    image = decoded.convert("RGB")
         except Exception as exc:
             image_embeddings_total.labels(status="failure").inc()
             raise ValueError(f"Could not decode image: {exc}") from exc
 
         # CLIP encoder is CPU/GPU-bound; offload off the event loop.
-        vector = await asyncio.to_thread(self.clip.encode_image, image)
+        vector = await self.admission.run_clip(self.clip.encode_image, image)
         image_embeddings_total.labels(status="success").inc()
 
         descriptor = _space_descriptor(self.clip)
@@ -82,39 +120,16 @@ class ImageEmbeddingService:
         return await self.embed_bytes(image_bytes, content_id=content_id)
 
     async def _download(self, url: str) -> bytes:
-        try:
-            validate_public_url(url)
-        except UnsafeURLError as exc:
-            raise ValueError(f"Refusing to fetch unsafe URL: {exc}") from exc
-        async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT_SEC) as client:
-            async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                # Reject early on declared Content-Length over cap.
-                content_length = resp.headers.get("content-length")
-                if (
-                    content_length
-                    and content_length.isdigit()
-                    and int(content_length) > MAX_DOWNLOAD_BYTES
-                ):
-                    raise ValueError(
-                        f"Image at {url} declares {content_length} bytes, "
-                        f"exceeds {MAX_DOWNLOAD_BYTES} cap"
-                    )
-
-                buf = BytesIO()
-                written = 0
-                async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
-                    written += len(chunk)
-                    if written > MAX_DOWNLOAD_BYTES:
-                        raise ValueError(
-                            f"Image at {url} exceeded {MAX_DOWNLOAD_BYTES} bytes during download"
-                        )
-                    buf.write(chunk)
-                return buf.getvalue()
+        return await self.fetch_client.get_bytes(
+            url, MAX_DOWNLOAD_BYTES, ("image/jpeg", "image/png", "image/webp")
+        )
 
     async def _write_back(
         self, content_id: str, vector: list[float], descriptor: dict | None = None
     ) -> tuple[str, str | None]:
+        if descriptor is None or not _is_writable_clip_descriptor(self.clip, descriptor):
+            logger.warning("image_embedding_writeback_refused", content_id=content_id)
+            return "failed", "image_embedding_space_unresolved"
         try:
             await self.cms_client.store_image_embedding(
                 content_id,
@@ -125,11 +140,10 @@ class ImageEmbeddingService:
             )
             logger.info("image_embedding_writeback_complete", content_id=content_id)
             return "ok", None
-        except Exception as exc:
-            err = str(exc)
+        except Exception:
             logger.error(
                 "image_embedding_writeback_failed",
                 content_id=content_id,
-                error=err,
+                error_code="cms_writeback_failed",
             )
-            return "failed", err
+            return "failed", "cms_writeback_failed"

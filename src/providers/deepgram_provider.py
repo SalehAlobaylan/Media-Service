@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 
+import anyio
 import httpx
 
 from src.models.whisper import TranscribeResult
@@ -46,6 +47,7 @@ class DeepgramProvider(STTProvider):
         self._model = model
         self._default_language = default_language
         self._timeout_sec = timeout_sec
+        self._client = httpx.AsyncClient(timeout=timeout_sec)
 
     @property
     def name(self) -> str:
@@ -106,6 +108,41 @@ class DeepgramProvider(STTProvider):
             data = resp.json()
 
         return self._parse(data, requested_language=language)
+
+    async def transcribe_async(
+        self, audio_path: str, language: str | None = None, word_timestamps: bool = False
+    ) -> TranscribeResult:
+        if not self._api_key:
+            raise RuntimeError("DEEPGRAM_API_KEY is not set")
+        suffix = os.path.splitext(audio_path)[1].lower()
+        content_type = _CONTENT_TYPES.get(suffix, "application/octet-stream")
+
+        async def stream_file():
+            async with await anyio.open_file(audio_path, "rb") as source:
+                while chunk := await source.read(1024 * 1024):
+                    yield chunk
+
+        response = await self._client.post(
+            DEEPGRAM_URL,
+            params={
+                "model": self._model,
+                "smart_format": "true",
+                "punctuate": "true",
+                "utterances": "true",
+                "language": language or self._default_language,
+            },
+            headers={
+                "Authorization": f"Token {self._api_key}",
+                "Content-Type": content_type,
+                "Content-Length": str(os.path.getsize(audio_path)),
+            },
+            content=stream_file(),
+        )
+        response.raise_for_status()
+        return self._parse(response.json(), requested_language=language)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     def _parse(self, data: dict, requested_language: str | None) -> TranscribeResult:
         results = data.get("results", {}) or {}

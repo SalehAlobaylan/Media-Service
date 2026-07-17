@@ -55,3 +55,9 @@ model_loaded = Gauge(
     "Whether a model is loaded (1=yes, 0=no)",
     ["model_name"],
 )
+
+workload_admission_total = Counter(
+    "media_workload_admission_total",
+    "Media workload admission decisions.",
+    ["workload", "outcome"],
+)

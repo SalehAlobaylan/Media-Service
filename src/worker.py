@@ -12,17 +12,20 @@ import os
 import tempfile
 from typing import Any
 
-from arq.connections import RedisSettings
 from redis.asyncio import Redis
 
 from src.clients.cms import CMSClient
 from src.clients.storage import StorageClient
+from src.clients.safe_fetch import SafeFetchClient
 from src.config import Settings
 from src.middleware.request_id import _request_id_ctx
 from src.models.manager import ModelManager
+from src.queue import build_redis_settings
 from src.services.transcription import TranscriptionService, provider_error_code
+from src.services.workload import WorkloadAdmission
 from src.utils.logging import get_logger, setup_logging
 from src.utils.metrics import transcribe_jobs_total
+from src.utils.tempdir import resolve_media_temp_dir
 
 logger = get_logger("media-worker")
 
@@ -32,19 +35,47 @@ async def _startup(ctx: dict[str, Any]) -> None:
     setup_logging(log_level=settings.LOG_LEVEL, json_output=settings.is_production)
     logger.info("worker_starting", env=settings.ENV)
 
+    config_errors, config_warnings = settings.validate_startup(expected_role="worker")
+    for warning in config_warnings:
+        logger.warning("config_warning", error=warning)
+    if config_errors:
+        raise RuntimeError("Refusing worker startup: " + "; ".join(config_errors))
+
     model_manager = ModelManager(settings)
     cms_client = CMSClient(settings)
     storage_client = StorageClient(settings)
+    fetch_client = SafeFetchClient()
+    admission = WorkloadAdmission(stt_limit=1, clip_limit=1)
+    temp_dir = resolve_media_temp_dir(settings.MEDIA_TEMP_DIR)
 
     # The worker only runs transcribe_task (STT). Load the active STT engine only
     # — CLIP (~600 MB) is image-embedding, which is synchronous in the API and
     # never touched here. For a hosted engine (Deepgram) this is a no-op.
     await model_manager.warmup(["stt"])
+    if not model_manager.stt.is_loaded:
+        await cms_client.close()
+        raise RuntimeError("Refusing worker startup: STT provider is not ready")
+
+    if not await cms_client.health_check():
+        await cms_client.close()
+        raise RuntimeError("Refusing worker startup: CMS is not reachable")
+
+    redis = Redis.from_url(settings.REDIS_URL, db=settings.ARQ_REDIS_DB)
+    try:
+        await redis.ping()
+    except Exception as exc:
+        await cms_client.close()
+        raise RuntimeError("Refusing worker startup: Redis is not reachable") from exc
+    finally:
+        await redis.aclose()
 
     ctx["settings"] = settings
     ctx["model_manager"] = model_manager
     ctx["cms_client"] = cms_client
     ctx["storage_client"] = storage_client
+    ctx["temp_dir"] = temp_dir
+    ctx["fetch_client"] = fetch_client
+    ctx["workload_admission"] = admission
     logger.info(
         "worker_ready",
         stt_provider=model_manager.stt.name,
@@ -55,11 +86,20 @@ async def _startup(ctx: dict[str, Any]) -> None:
 
 async def _shutdown(ctx: dict[str, Any]) -> None:
     cms_client = ctx.get("cms_client")
+    fetch_client = ctx.get("fetch_client")
     if cms_client is not None:
         try:
             await cms_client.close()
         except Exception:
             pass
+    if fetch_client is not None:
+        await fetch_client.aclose()
+    model_manager = ctx.get("model_manager")
+    if model_manager is not None:
+        await model_manager.stt.aclose()
+    admission = ctx.get("workload_admission")
+    if admission is not None:
+        admission.shutdown()
     logger.info("worker_shutdown")
 
 
@@ -97,7 +137,14 @@ async def transcribe_task(
     try:
         model_manager: ModelManager = ctx["model_manager"]
         cms_client: CMSClient = ctx["cms_client"]
-        service = TranscriptionService(model_manager.stt, cms_client)
+        service = TranscriptionService(
+            model_manager.stt,
+            cms_client,
+            temp_dir=ctx.get("temp_dir"),
+            fetch_client=ctx.get("fetch_client"),
+            max_download_bytes=ctx["settings"].MAX_UPLOAD_MB * 1024 * 1024 if "settings" in ctx else 200 * 1024 * 1024,
+            admission=ctx.get("workload_admission"),
+        )
 
         if not model_manager.stt.is_loaded:
             if transcription_job_id:
@@ -131,7 +178,7 @@ async def transcribe_task(
                     )
                 suffix = os.path.splitext(storage_key)[1] or ".mp3"
                 fd, local_download_path = tempfile.mkstemp(
-                    suffix=suffix, prefix="media_async_"
+                    suffix=suffix, prefix="media_async_", dir=ctx.get("temp_dir")
                 )
                 os.close(fd)
                 await storage_client.download_to_path(storage_key, local_download_path)
@@ -221,18 +268,9 @@ async def transcribe_task(
             _request_id_ctx.reset(token)
 
 
-def _build_redis_settings() -> RedisSettings:
+def _build_redis_settings():
     """Parse REDIS_URL into arq's RedisSettings, applying ARQ_REDIS_DB."""
-    settings = Settings()
-    # arq parses host/port/password from RedisSettings; rather than re-implementing
-    # URL parsing, use redis-py to crack the URL then re-pack for arq.
-    parsed = Redis.from_url(settings.REDIS_URL).connection_pool.connection_kwargs
-    return RedisSettings(
-        host=parsed.get("host", "localhost"),
-        port=parsed.get("port", 6379),
-        password=parsed.get("password"),
-        database=settings.ARQ_REDIS_DB,
-    )
+    return build_redis_settings(Settings())
 
 
 class WorkerSettings:
