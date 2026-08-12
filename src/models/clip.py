@@ -3,6 +3,7 @@
 Uses sentence-transformers' clip-ViT-B-32. Output is a 512-dim L2-normalized
 vector suitable for cosine-similarity search in pgvector.
 """
+
 from __future__ import annotations
 
 import os
@@ -123,9 +124,7 @@ class CLIPWrapper:
         test_embedding = self._model.encode([probe])
         self._dimensions = len(test_embedding[0])
         if not self._revision:
-            self._revision = _resolve_hf_revision(
-                self._model_name, self._cache_folder
-            )
+            self._revision = _resolve_hf_revision(self._model_name, self._cache_folder)
         logger.info(
             "clip_loaded",
             model_name=self._model_name,

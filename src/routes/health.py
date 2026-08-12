@@ -103,7 +103,11 @@ async def queue_status(request: Request) -> QueueStatusResponse:
     key, which the worker refreshes every WorkerSettings.health_check_interval.
     """
     manager = getattr(request.app.state, "queue_manager", None)
-    pool = await manager.get_pool() if manager is not None else getattr(request.app.state, "arq_pool", None)
+    pool = (
+        await manager.get_pool()
+        if manager is not None
+        else getattr(request.app.state, "arq_pool", None)
+    )
     if pool is None:
         settings = request.app.state.settings
         return QueueStatusResponse(

@@ -57,7 +57,9 @@ class CircuitBreaker:
                 )
             if self._state == CircuitState.HALF_OPEN:
                 if self._half_open_in_flight >= self.half_open_requests:
-                    raise CircuitOpenError("Circuit breaker is probing recovery. Retry shortly.")
+                    raise CircuitOpenError(
+                        "Circuit breaker is probing recovery. Retry shortly."
+                    )
                 self._half_open_in_flight += 1
             generation = self._generation
 

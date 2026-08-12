@@ -72,9 +72,7 @@ def validate_public_host(host: str, port: int) -> str:
 
     for ip in resolved:
         if not _is_public_ip(ip):
-            raise UnsafeURLError(
-                f"host '{host}' resolves to non-public address {ip}"
-            )
+            raise UnsafeURLError(f"host '{host}' resolves to non-public address {ip}")
 
     return resolved[0]
 

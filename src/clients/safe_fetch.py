@@ -1,4 +1,5 @@
 """Pooled, byte-bounded HTTP fetches pinned to a verified public address."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -30,7 +31,9 @@ class _PinnedBackend(httpcore.AsyncNetworkBackend):
 class _PinnedTransport(httpx.AsyncBaseTransport):
     def __init__(self) -> None:
         self._pool = httpcore.AsyncConnectionPool(
-            network_backend=_PinnedBackend(), max_connections=20, max_keepalive_connections=10
+            network_backend=_PinnedBackend(),
+            max_connections=20,
+            max_keepalive_connections=10,
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -92,7 +95,9 @@ class SafeFetchClient:
             declared = response.headers.get("content-length")
             if declared and declared.isdigit() and int(declared) > max_bytes:
                 raise ValueError("remote media exceeds the allowed size")
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+            content_type = (
+                response.headers.get("content-type", "").split(";", 1)[0].lower()
+            )
             if allowed_content_prefixes and not any(
                 content_type.startswith(prefix) for prefix in allowed_content_prefixes
             ):
@@ -105,7 +110,11 @@ class SafeFetchClient:
             return bytes(payload)
 
     async def download_to_path(
-        self, url: str, path: str, max_bytes: int, allowed_content_prefixes: tuple[str, ...] = ()
+        self,
+        url: str,
+        path: str,
+        max_bytes: int,
+        allowed_content_prefixes: tuple[str, ...] = (),
     ) -> None:
         payload = await self.get_bytes(url, max_bytes, allowed_content_prefixes)
         with open(path, "wb") as destination:

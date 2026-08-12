@@ -41,8 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         for err in config_errors:
             logger.error("config_invalid", error=err)
         raise RuntimeError(
-            "Refusing to start: invalid configuration — "
-            + "; ".join(config_errors)
+            "Refusing to start: invalid configuration — " + "; ".join(config_errors)
         )
 
     model_manager = ModelManager(settings)
@@ -109,7 +108,9 @@ app.add_middleware(
 # operators must set CORS_ALLOWED_ORIGINS explicitly or to "" to disable.
 _cors_setting = Settings()
 _cors_origins = [
-    o.strip() for o in (_cors_setting.CORS_ALLOWED_ORIGINS or "").split(",") if o.strip()
+    o.strip()
+    for o in (_cors_setting.CORS_ALLOWED_ORIGINS or "").split(",")
+    if o.strip()
 ]
 if _cors_origins:
     app.add_middleware(

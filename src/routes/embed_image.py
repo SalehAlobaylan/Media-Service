@@ -6,6 +6,7 @@ Accepts either:
 
 Plus optional `content_id` for CMS write-back. Returns a 512-dim vector.
 """
+
 from __future__ import annotations
 
 from uuid import UUID

@@ -9,6 +9,7 @@ This copy lives in Media-Service for the CLIP (image) space. It is intentionally
 duplicated rather than shared, because the three services deploy independently;
 the golden fixture test in each service pins them together.
 """
+
 from __future__ import annotations
 
 import hashlib

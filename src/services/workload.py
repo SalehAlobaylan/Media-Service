@@ -1,4 +1,5 @@
 """Finite, independent admission gates for paid STT and CLIP work."""
+
 from __future__ import annotations
 
 import asyncio
@@ -15,10 +16,17 @@ class WorkloadOverloadedError(RuntimeError):
 class WorkloadAdmission:
     # One hosted STT and one CLIP inference fit the smallest supported API
     # instance; they are deliberately independent so neither starves the other.
-    def __init__(self, stt_limit: int = 1, clip_limit: int = 1, wait_seconds: float = 0.25):
-        self._semaphores = {"stt": asyncio.Semaphore(stt_limit), "clip": asyncio.Semaphore(clip_limit)}
+    def __init__(
+        self, stt_limit: int = 1, clip_limit: int = 1, wait_seconds: float = 0.25
+    ):
+        self._semaphores = {
+            "stt": asyncio.Semaphore(stt_limit),
+            "clip": asyncio.Semaphore(clip_limit),
+        }
         self._wait_seconds = wait_seconds
-        self._clip_executor = ThreadPoolExecutor(max_workers=clip_limit, thread_name_prefix="media-clip")
+        self._clip_executor = ThreadPoolExecutor(
+            max_workers=clip_limit, thread_name_prefix="media-clip"
+        )
 
     @asynccontextmanager
     async def acquire(self, workload: str):

@@ -9,9 +9,12 @@ Text embedding write-back stays in Enrichment-Service. If Media ever
 needs more CMS surface, copy the method shape from Enrichment-Service/
 src/clients/cms.py exactly — the patterns are identical by design.
 """
+
 from typing import Any
 
 import httpx
+
+from src.contracts.artifact_coverage import ArtifactCoverageClaim
 
 from src.clients.circuit_breaker import CircuitBreaker
 from src.config import Settings
@@ -60,10 +63,61 @@ class CMSClient:
 
     async def health_check(self) -> bool:
         try:
-            resp = await self.client.get(f"{self.public_base_url}/health")
+            # CMS /health aggregates this service's readiness. Liveness avoids
+            # turning that dependency check into a circular readiness failure.
+            resp = await self.client.get(f"{self.public_base_url}/live")
             return resp.status_code == 200
         except httpx.HTTPError:
             return False
+
+    async def claim_artifact_coverage(self) -> dict[str, Any] | None:
+        result = await self._request(
+            "POST",
+            "/internal/artifact-coverage/media/claim",
+            json={},
+            metric_label="claim_artifact_coverage",
+        )
+        if not result:
+            return None
+        return ArtifactCoverageClaim.model_validate(result).model_dump(mode="json")
+
+    async def begin_artifact_coverage(self, request_id: str, claim_token: str) -> None:
+        await self._request(
+            "POST",
+            f"/internal/artifact-coverage/media/{request_id}/begin",
+            json={"claim_token": claim_token},
+            metric_label="begin_artifact_coverage",
+        )
+
+    async def heartbeat_artifact_coverage(
+        self, request_id: str, claim_token: str
+    ) -> None:
+        await self._request(
+            "POST",
+            f"/internal/artifact-coverage/media/{request_id}/heartbeat",
+            json={"claim_token": claim_token},
+            metric_label="heartbeat_artifact_coverage",
+        )
+
+    async def accept_artifact_coverage(
+        self, request_id: str, claim_token: str, proof: dict[str, Any]
+    ) -> None:
+        await self._request(
+            "POST",
+            f"/internal/artifact-coverage/media/{request_id}/accepted",
+            json={"claim_token": claim_token, "proof": proof},
+            metric_label="accept_artifact_coverage",
+        )
+
+    async def mark_artifact_coverage_uncertain(
+        self, request_id: str, claim_token: str
+    ) -> None:
+        await self._request(
+            "POST",
+            f"/internal/artifact-coverage/media/{request_id}/uncertain",
+            json={"claim_token": claim_token},
+            metric_label="uncertain_artifact_coverage",
+        )
 
     async def create_transcript(
         self,
@@ -79,6 +133,7 @@ class CMSClient:
         transcription_job_id: str | None = None,
         language_probability: float | None = None,
         duration_sec: float | None = None,
+        artifact_recovery: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "content_item_id": content_item_id,
@@ -103,6 +158,8 @@ class CMSClient:
             payload["language_probability"] = language_probability
         if duration_sec is not None:
             payload["duration_sec"] = duration_sec
+        if artifact_recovery:
+            payload["artifact_recovery"] = artifact_recovery
 
         return await self._request(
             "POST",
@@ -130,6 +187,7 @@ class CMSClient:
         model: str | None = None,
         space_id: str | None = None,
         producer_id: str | None = None,
+        artifact_recovery: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Persist a 512-dim CLIP image embedding to content_items.image_embedding.
 
@@ -144,6 +202,8 @@ class CMSClient:
             payload["space_id"] = space_id
         if producer_id:
             payload["producer_id"] = producer_id
+        if artifact_recovery:
+            payload["artifact_recovery"] = artifact_recovery
         return await self._request(
             "PATCH",
             f"/internal/content-items/{content_id}/image-embedding",
@@ -180,6 +240,8 @@ class CMSClient:
             headers = {"X-Request-ID": request_id} if request_id else None
             resp = await self.client.request(method, url, json=json, headers=headers)
             resp.raise_for_status()
+            if resp.status_code == 204:
+                return {}
             return resp.json()
 
         try:

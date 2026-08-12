@@ -7,6 +7,7 @@ word-level timestamps; `language=multi` enables code-switching (Arabic+English).
 The TranscriptionService runs transcribe() in a worker thread, so a synchronous
 httpx call here is fine even for long podcasts.
 """
+
 from __future__ import annotations
 
 import os
@@ -110,7 +111,10 @@ class DeepgramProvider(STTProvider):
         return self._parse(data, requested_language=language)
 
     async def transcribe_async(
-        self, audio_path: str, language: str | None = None, word_timestamps: bool = False
+        self,
+        audio_path: str,
+        language: str | None = None,
+        word_timestamps: bool = False,
     ) -> TranscribeResult:
         if not self._api_key:
             raise RuntimeError("DEEPGRAM_API_KEY is not set")

@@ -6,11 +6,16 @@ configured hosted STT provider and runs jobs from Redis until shut down.
 Run via: `arq src.worker.WorkerSettings`
 Or via:  `make worker`
 """
+
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 from typing import Any
+
+from arq import cron
+from arq.worker import func
 
 from redis.asyncio import Redis
 
@@ -22,6 +27,7 @@ from src.middleware.request_id import _request_id_ctx
 from src.models.manager import ModelManager
 from src.queue import build_redis_settings
 from src.services.transcription import TranscriptionService, provider_error_code
+from src.services.image_embedding import ImageEmbeddingService
 from src.services.workload import WorkloadAdmission
 from src.utils.logging import get_logger, setup_logging
 from src.utils.metrics import transcribe_jobs_total
@@ -48,13 +54,15 @@ async def _startup(ctx: dict[str, Any]) -> None:
     admission = WorkloadAdmission(stt_limit=1, clip_limit=1)
     temp_dir = resolve_media_temp_dir(settings.MEDIA_TEMP_DIR)
 
-    # The worker only runs transcribe_task (STT). Load the active STT engine only
-    # — CLIP (~600 MB) is image-embedding, which is synchronous in the API and
-    # never touched here. For a hosted engine (Deepgram) this is a no-op.
-    await model_manager.warmup(["stt"])
+    # Artifact recovery owns transcript and image-embedding claims, so both
+    # registered engines must be ready before this worker advertises liveness.
+    await model_manager.warmup(["stt", "clip"])
     if not model_manager.stt.is_loaded:
         await cms_client.close()
         raise RuntimeError("Refusing worker startup: STT provider is not ready")
+    if not model_manager.clip.is_loaded:
+        await cms_client.close()
+        raise RuntimeError("Refusing worker startup: CLIP provider is not ready")
 
     if not await cms_client.health_check():
         await cms_client.close()
@@ -114,6 +122,7 @@ async def transcribe_task(
     request_id: str | None = None,
     storage_key: str | None = None,
     media_size_bytes: int | None = None,
+    artifact_recovery: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run transcription. Exactly one of (storage_key, url, audio_path) is set.
 
@@ -142,7 +151,9 @@ async def transcribe_task(
             cms_client,
             temp_dir=ctx.get("temp_dir"),
             fetch_client=ctx.get("fetch_client"),
-            max_download_bytes=ctx["settings"].MAX_UPLOAD_MB * 1024 * 1024 if "settings" in ctx else 200 * 1024 * 1024,
+            max_download_bytes=ctx["settings"].MAX_UPLOAD_MB * 1024 * 1024
+            if "settings" in ctx
+            else 200 * 1024 * 1024,
             admission=ctx.get("workload_admission"),
         )
 
@@ -189,6 +200,7 @@ async def transcribe_task(
                     language=language,
                     media_size_bytes=media_size_bytes,
                     word_timestamps=word_timestamps,
+                    artifact_recovery=artifact_recovery,
                 )
             elif url:
                 response = await service.transcribe_url(
@@ -198,6 +210,7 @@ async def transcribe_task(
                     language=language,
                     media_size_bytes=media_size_bytes,
                     word_timestamps=word_timestamps,
+                    artifact_recovery=artifact_recovery,
                 )
             elif audio_path:
                 response = await service.transcribe_file(
@@ -207,6 +220,7 @@ async def transcribe_task(
                     language=language,
                     media_size_bytes=media_size_bytes,
                     word_timestamps=word_timestamps,
+                    artifact_recovery=artifact_recovery,
                 )
             else:
                 raise ValueError("Must provide storage_key, url, or audio_path")
@@ -224,7 +238,12 @@ async def transcribe_task(
         # Delete the storage object only on success. On failure we leave it so
         # an arq retry can re-download; orphans from terminal failures should be
         # swept by a bucket lifecycle/expiry rule.
-        if succeeded and storage_key and storage_client and storage_client.is_configured:
+        if (
+            succeeded
+            and storage_key
+            and storage_client
+            and storage_client.is_configured
+        ):
             try:
                 await storage_client.delete_object(storage_key)
             except Exception as exc:
@@ -252,7 +271,9 @@ async def transcribe_task(
                     "provider_error_code": provider_error_code(exc),
                     "metadata": {
                         "media_size_bytes": media_size_bytes,
-                    } if media_size_bytes is not None else None,
+                    }
+                    if media_size_bytes is not None
+                    else None,
                 },
             )
         transcribe_jobs_total.labels(state="failed").inc()
@@ -268,6 +289,100 @@ async def transcribe_task(
             _request_id_ctx.reset(token)
 
 
+async def artifact_coverage_dispatch_tick(ctx: dict[str, Any]) -> None:
+    claim = await ctx["cms_client"].claim_artifact_coverage()
+    if not claim:
+        return
+    await ctx["redis"].enqueue_job(
+        "artifact_coverage_task",
+        claim,
+        _job_id=claim["deterministic_job_id"],
+    )
+
+
+async def artifact_coverage_task(
+    ctx: dict[str, Any], claim: dict[str, Any]
+) -> dict[str, str]:
+    cms: CMSClient = ctx["cms_client"]
+    request_id = claim["id"]
+    token = claim["claim_token"]
+    await cms.begin_artifact_coverage(request_id, token)
+    heartbeat_stop = asyncio.Event()
+
+    async def heartbeat() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(heartbeat_stop.wait(), timeout=15)
+                return
+            except TimeoutError:
+                await cms.heartbeat_artifact_coverage(request_id, token)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    correlation = {
+        "request_id": request_id,
+        "attempt_id": claim["attempt_id"],
+        "claim_token": token,
+        "fence_token": claim["fence_token"],
+        "input_digest": claim["input_digest"],
+        "producer_event_id": f"media:{claim['attempt_id']}",
+    }
+    content = claim["content"]
+    artifact = claim["artifact"]
+    model_manager: ModelManager = ctx["model_manager"]
+    try:
+        if artifact == "transcript":
+            url = content.get("media_url") or content.get("original_url")
+            if not url:
+                raise RuntimeError("CMS transcript claim has no media URL")
+            service = TranscriptionService(
+                model_manager.stt,
+                cms,
+                temp_dir=ctx.get("temp_dir"),
+                fetch_client=ctx.get("fetch_client"),
+                admission=ctx.get("workload_admission"),
+            )
+            response = await service.transcribe_url(
+                url,
+                content_id=content["id"],
+                word_timestamps=True,
+                artifact_recovery=correlation,
+            )
+            if response.write_back_status != "ok":
+                raise RuntimeError("transcript recovery was not persisted")
+        elif artifact == "image_embedding":
+            url = content.get("thumbnail_url") or content.get("media_url")
+            if not url:
+                raise RuntimeError("CMS image claim has no image URL")
+            service = ImageEmbeddingService(
+                model_manager.clip,
+                cms,
+                fetch_client=ctx.get("fetch_client"),
+                admission=ctx.get("workload_admission"),
+            )
+            response = await service.embed_url(
+                url, content_id=content["id"], artifact_recovery=correlation
+            )
+            if response.write_back_status != "ok":
+                raise RuntimeError("image recovery was not persisted")
+        else:
+            raise RuntimeError("CMS returned an artifact outside Media capability")
+        await cms.accept_artifact_coverage(
+            request_id, token, {"artifact": artifact, "write_back_status": "ok"}
+        )
+        return {"request_id": request_id, "state": "verifying"}
+    except Exception:
+        try:
+            await cms.mark_artifact_coverage_uncertain(request_id, token)
+        except Exception:
+            # CMS lease recovery performs the same transition if the explicit
+            # uncertainty receipt cannot be delivered during an outage.
+            pass
+        raise
+    finally:
+        heartbeat_stop.set()
+        await heartbeat_task
+
+
 def _build_redis_settings():
     """Parse REDIS_URL into arq's RedisSettings, applying ARQ_REDIS_DB."""
     return build_redis_settings(Settings())
@@ -276,7 +391,14 @@ def _build_redis_settings():
 class WorkerSettings:
     """arq picks this up via `arq src.worker.WorkerSettings`."""
 
-    functions = [transcribe_task]
+    functions = [transcribe_task, func(artifact_coverage_task, max_tries=1)]
+    cron_jobs = [
+        cron(
+            artifact_coverage_dispatch_tick,
+            second={0, 10, 20, 30, 40, 50},
+            run_at_startup=True,
+        )
+    ]
     on_startup = _startup
     on_shutdown = _shutdown
     redis_settings = _build_redis_settings()

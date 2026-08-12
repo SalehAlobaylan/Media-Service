@@ -5,6 +5,7 @@ transcription path is unchanged; it just now sits behind the STTProvider
 interface. Selected only when STT_PROVIDER=whisper (or when the configured
 hosted provider has no API key).
 """
+
 from __future__ import annotations
 
 from src.models.whisper import TranscribeResult, WhisperWrapper

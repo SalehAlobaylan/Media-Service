@@ -5,6 +5,7 @@ Accepts either raw image bytes (upload) or a URL (we download). Outputs a
 CMS via PATCH /internal/content-items/:id/image-embedding — same shape as
 transcribe write-back.
 """
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -52,7 +53,10 @@ def _is_writable_clip_descriptor(clip: CLIPWrapper, descriptor: dict) -> bool:
 
 class ImageEmbeddingService:
     def __init__(
-        self, clip: CLIPWrapper, cms_client: CMSClient, fetch_client: SafeFetchClient | None = None,
+        self,
+        clip: CLIPWrapper,
+        cms_client: CMSClient,
+        fetch_client: SafeFetchClient | None = None,
         admission: WorkloadAdmission | None = None,
     ):
         self.clip = clip
@@ -64,6 +68,7 @@ class ImageEmbeddingService:
         self,
         image_bytes: bytes,
         content_id: str | None = None,
+        artifact_recovery: dict[str, str] | None = None,
     ) -> ImageEmbedResponse:
         if not self.clip.is_loaded:
             image_embeddings_total.labels(status="failure").inc()
@@ -105,7 +110,9 @@ class ImageEmbeddingService:
         )
 
         if content_id:
-            status, error = await self._write_back(content_id, vector, descriptor)
+            status, error = await self._write_back(
+                content_id, vector, descriptor, artifact_recovery
+            )
             response.write_back_status = status
             response.write_back_error = error
 
@@ -115,9 +122,12 @@ class ImageEmbeddingService:
         self,
         url: str,
         content_id: str | None = None,
+        artifact_recovery: dict[str, str] | None = None,
     ) -> ImageEmbedResponse:
         image_bytes = await self._download(url)
-        return await self.embed_bytes(image_bytes, content_id=content_id)
+        return await self.embed_bytes(
+            image_bytes, content_id=content_id, artifact_recovery=artifact_recovery
+        )
 
     async def _download(self, url: str) -> bytes:
         return await self.fetch_client.get_bytes(
@@ -125,9 +135,15 @@ class ImageEmbeddingService:
         )
 
     async def _write_back(
-        self, content_id: str, vector: list[float], descriptor: dict | None = None
+        self,
+        content_id: str,
+        vector: list[float],
+        descriptor: dict | None = None,
+        artifact_recovery: dict[str, str] | None = None,
     ) -> tuple[str, str | None]:
-        if descriptor is None or not _is_writable_clip_descriptor(self.clip, descriptor):
+        if descriptor is None or not _is_writable_clip_descriptor(
+            self.clip, descriptor
+        ):
             logger.warning("image_embedding_writeback_refused", content_id=content_id)
             return "failed", "image_embedding_space_unresolved"
         try:
@@ -137,6 +153,7 @@ class ImageEmbeddingService:
                 model=descriptor.get("model") if descriptor else None,
                 space_id=descriptor.get("space_id") if descriptor else None,
                 producer_id=descriptor.get("producer_id") if descriptor else None,
+                artifact_recovery=artifact_recovery,
             )
             logger.info("image_embedding_writeback_complete", content_id=content_id)
             return "ok", None

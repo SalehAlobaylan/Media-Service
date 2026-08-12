@@ -4,6 +4,7 @@ Picks the hosted engine from STT_PROVIDER at boot. Whisper fallback is disabled:
 missing credentials or unknown providers must surface as visible readiness/job
 failures instead of silently changing transcript quality.
 """
+
 from __future__ import annotations
 
 from src.config import Settings
@@ -15,7 +16,9 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-def build_stt_provider(settings: Settings, whisper_wrapper: WhisperWrapper) -> STTProvider:
+def build_stt_provider(
+    settings: Settings, whisper_wrapper: WhisperWrapper
+) -> STTProvider:
     provider = (settings.STT_PROVIDER or "deepgram").strip().lower()
 
     if provider in ("whisper", "faster-whisper"):
@@ -27,7 +30,9 @@ def build_stt_provider(settings: Settings, whisper_wrapper: WhisperWrapper) -> S
                 "deepgram_key_missing_stt_not_ready",
                 hint="set DEEPGRAM_API_KEY to use Deepgram",
             )
-        logger.info("stt_provider_selected", provider="deepgram", model=settings.DEEPGRAM_MODEL)
+        logger.info(
+            "stt_provider_selected", provider="deepgram", model=settings.DEEPGRAM_MODEL
+        )
         return DeepgramProvider(
             api_key=settings.DEEPGRAM_API_KEY,
             model=settings.DEEPGRAM_MODEL,

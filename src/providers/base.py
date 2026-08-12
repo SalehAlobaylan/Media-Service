@@ -8,6 +8,7 @@ subclass + a factory branch.
 All providers return the shared TranscribeResult so the TranscriptionService and
 CMS write-back are engine-agnostic.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -64,13 +65,19 @@ class STTProvider(ABC):
         thread. Returns the shared TranscribeResult."""
 
     async def transcribe_async(
-        self, audio_path: str, language: str | None = None, word_timestamps: bool = False
+        self,
+        audio_path: str,
+        language: str | None = None,
+        word_timestamps: bool = False,
     ) -> TranscribeResult:
         """Hosted providers override this; legacy local providers remain sync."""
         import asyncio
 
         return await asyncio.to_thread(
-            self.transcribe, audio_path, language=language, word_timestamps=word_timestamps
+            self.transcribe,
+            audio_path,
+            language=language,
+            word_timestamps=word_timestamps,
         )
 
     async def aclose(self) -> None:

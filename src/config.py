@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # Server
     PORT: int = 5051
@@ -29,7 +31,9 @@ class Settings(BaseSettings):
     # toggle/budget that govern WHEN STT runs live in the CMS transcription_config
     # table, not here. Default Deepgram Nova-3 (Arabic dialect coverage).
     STT_PROVIDER: str = "deepgram"
-    STT_DEFAULT_LANGUAGE: str = "multi"  # 'multi' = code-switching (ar+en); or 'ar'/'en'
+    STT_DEFAULT_LANGUAGE: str = (
+        "multi"  # 'multi' = code-switching (ar+en); or 'ar'/'en'
+    )
     DEEPGRAM_API_KEY: str = ""
     DEEPGRAM_MODEL: str = "nova-3"
 
@@ -130,7 +134,9 @@ class Settings(BaseSettings):
         )
         return any(values) and not all(values)
 
-    def validate_startup(self, expected_role: str | None = None) -> tuple[list[str], list[str]]:
+    def validate_startup(
+        self, expected_role: str | None = None
+    ) -> tuple[list[str], list[str]]:
         """Return (fatal_errors, warnings).
 
         Roles are explicit so an API image cannot accidentally consume jobs and

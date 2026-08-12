@@ -4,6 +4,7 @@ Metric prefix is `media_*` (not `enrichment_*`) so both services'
 `/metrics` endpoints can be scraped into the same Prometheus instance
 without collisions.
 """
+
 from prometheus_client import Counter, Gauge, Histogram
 
 # ─── Transcription ──────────────────────────────────────────

@@ -8,6 +8,7 @@ API container's local disk, and means the API and worker need no shared volume.
 boto3 is synchronous, so every call is dispatched to a thread via
 `asyncio.to_thread` to avoid blocking the event loop.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -102,14 +103,18 @@ class StorageClient:
             raise
 
     async def download_to_path(self, key: str, dest_path: str) -> None:
-        await asyncio.to_thread(self._client.download_file, self._bucket, key, dest_path)
+        await asyncio.to_thread(
+            self._client.download_file, self._bucket, key, dest_path
+        )
 
     async def delete_object(self, key: str) -> None:
         await asyncio.to_thread(
             self._client.delete_object, Bucket=self._bucket, Key=key
         )
 
-    async def list_objects(self, prefix: str, max_keys: int) -> list[tuple[str, datetime]]:
+    async def list_objects(
+        self, prefix: str, max_keys: int
+    ) -> list[tuple[str, datetime]]:
         """Return one bounded page of object keys and last-modified timestamps."""
         response = await asyncio.to_thread(
             self._client.list_objects_v2,

@@ -16,6 +16,7 @@ from src.utils.url_guard import UnsafeURLError, validate_public_url
 
 logger = get_logger(__name__)
 
+
 def provider_error_code(exc: Exception) -> str:
     message = str(exc).lower()
     if "api_key" in message or "not set" in message or "not ready" in message:
@@ -78,6 +79,7 @@ class TranscriptionService:
         language: str | None = None,
         media_size_bytes: int | None = None,
         word_timestamps: bool = False,
+        artifact_recovery: dict[str, str] | None = None,
     ) -> TranscribeResponse:
         model_size = self.stt.model_size
 
@@ -91,7 +93,9 @@ class TranscriptionService:
                     "language": language,
                     "metadata": {
                         "media_size_bytes": media_size_bytes,
-                    } if media_size_bytes is not None else None,
+                    }
+                    if media_size_bytes is not None
+                    else None,
                 },
             )
 
@@ -101,7 +105,9 @@ class TranscriptionService:
                     transcribe_async = getattr(self.stt, "transcribe_async", None)
                     if inspect.iscoroutinefunction(transcribe_async):
                         result = await transcribe_async(
-                            audio_path, language=language, word_timestamps=word_timestamps
+                            audio_path,
+                            language=language,
+                            word_timestamps=word_timestamps,
                         )
                     else:
                         result = await asyncio.to_thread(
@@ -139,7 +145,10 @@ class TranscriptionService:
 
         if content_id:
             status, error = await self._write_back(
-                content_id, response, transcription_job_id=transcription_job_id
+                content_id,
+                response,
+                transcription_job_id=transcription_job_id,
+                artifact_recovery=artifact_recovery,
             )
             response.write_back_status = status
             response.write_back_error = error
@@ -169,6 +178,7 @@ class TranscriptionService:
         language: str | None = None,
         media_size_bytes: int | None = None,
         word_timestamps: bool = False,
+        artifact_recovery: dict[str, str] | None = None,
     ) -> TranscribeResponse:
         try:
             audio_path = await self._download(url)
@@ -184,7 +194,9 @@ class TranscriptionService:
                         "provider_error_code": "media_download_failed",
                         "metadata": {
                             "media_size_bytes": media_size_bytes,
-                        } if media_size_bytes is not None else None,
+                        }
+                        if media_size_bytes is not None
+                        else None,
                     },
                 )
             raise
@@ -196,6 +208,7 @@ class TranscriptionService:
                 language=language,
                 media_size_bytes=media_size_bytes,
                 word_timestamps=word_timestamps,
+                artifact_recovery=artifact_recovery,
             )
         finally:
             self._cleanup(audio_path)
@@ -205,6 +218,7 @@ class TranscriptionService:
         content_id: str,
         result: TranscribeResponse,
         transcription_job_id: str | None = None,
+        artifact_recovery: dict[str, str] | None = None,
     ) -> tuple[str, str | None]:
         """Persist transcript to CMS. Returns (status, error_message).
 
@@ -230,6 +244,7 @@ class TranscriptionService:
                     transcription_job_id=transcription_job_id,
                     language_probability=result.language_probability,
                     duration_sec=result.duration_sec,
+                    artifact_recovery=artifact_recovery,
                 )
                 logger.info("transcript_writeback_complete", content_id=content_id)
                 return "ok", None

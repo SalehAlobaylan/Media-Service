@@ -1,4 +1,5 @@
 """ASGI request-body guard for media uploads before multipart spooling."""
+
 from __future__ import annotations
 
 from starlette.responses import JSONResponse
@@ -19,11 +20,21 @@ class RequestBodyLimitMiddleware:
             return
 
         content_length = next(
-            (value for key, value in scope.get("headers", []) if key == b"content-length"), None
+            (
+                value
+                for key, value in scope.get("headers", [])
+                if key == b"content-length"
+            ),
+            None,
         )
-        if content_length and content_length.isdigit() and int(content_length) > self.max_bytes:
+        if (
+            content_length
+            and content_length.isdigit()
+            and int(content_length) > self.max_bytes
+        ):
             await JSONResponse(
-                {"error": "Request body exceeds the configured upload limit"}, status_code=413
+                {"error": "Request body exceeds the configured upload limit"},
+                status_code=413,
             )(scope, receive, send)
             return
 
@@ -42,7 +53,8 @@ class RequestBodyLimitMiddleware:
             await self.app(scope, limited_receive, send)
         except _RequestBodyTooLarge:
             await JSONResponse(
-                {"error": "Request body exceeds the configured upload limit"}, status_code=413
+                {"error": "Request body exceeds the configured upload limit"},
+                status_code=413,
             )(scope, receive, send)
 
 

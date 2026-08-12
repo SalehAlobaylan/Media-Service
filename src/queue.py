@@ -1,4 +1,5 @@
 """ARQ connection settings and lifecycle-managed API queue access."""
+
 from __future__ import annotations
 
 import asyncio
@@ -77,7 +78,9 @@ class ArqPoolManager:
 
     async def start(self) -> None:
         await self._connect_once()
-        self._task = asyncio.create_task(self._reconnect_loop(), name="media-arq-reconnect")
+        self._task = asyncio.create_task(
+            self._reconnect_loop(), name="media-arq-reconnect"
+        )
 
     async def get_pool(self) -> Any | None:
         if self._pool is None:

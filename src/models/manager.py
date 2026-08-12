@@ -4,6 +4,7 @@ Loads Whisper + CLIP only. Text embedder and reranker live in
 Enrichment-Service. Same loading pattern as Enrichment's manager so the
 two services stay structurally aligned.
 """
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
@@ -92,12 +93,16 @@ class ModelManager:
         local Whisper model is loaded — saving memory on the API + worker.
         """
         loaders = {"stt": self.stt.load, "clip": self.clip.load}
-        selected = list(loaders) if models is None else [m for m in models if m in loaders]
+        selected = (
+            list(loaders) if models is None else [m for m in models if m in loaders]
+        )
 
         loop = asyncio.get_event_loop()
         logger.info("loading_models", models=selected)
 
-        tasks = [loop.run_in_executor(self._executor, loaders[name]) for name in selected]
+        tasks = [
+            loop.run_in_executor(self._executor, loaders[name]) for name in selected
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for name, result in zip(selected, results):

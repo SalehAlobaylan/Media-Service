@@ -29,6 +29,6 @@ async def test_worker_startup_fails_before_ready_context_when_stt_is_unavailable
     with pytest.raises(RuntimeError, match="STT provider is not ready"):
         await worker._startup(context)
 
-    manager.warmup.assert_awaited_once_with(["stt"])
+    manager.warmup.assert_awaited_once_with(["stt", "clip"])
     cms.close.assert_awaited_once()
     assert context == {}

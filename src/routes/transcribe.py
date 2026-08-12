@@ -27,7 +27,16 @@ UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MB
 SPOOL_SWEEP_GRACE = timedelta(minutes=15)
 SPOOL_SWEEP_MAX_KEYS = 100
 SUPPORTED_LANGUAGES = {"ar", "en", "multi"}
-ALLOWED_AUDIO_SUFFIXES = {".mp3", ".m4a", ".mp4", ".wav", ".ogg", ".opus", ".flac", ".webm"}
+ALLOWED_AUDIO_SUFFIXES = {
+    ".mp3",
+    ".m4a",
+    ".mp4",
+    ".wav",
+    ".ogg",
+    ".opus",
+    ".flac",
+    ".webm",
+}
 
 
 async def _get_arq_pool(request: Request):
@@ -79,7 +88,10 @@ def _validate_transcription_metadata(
     language: str | None,
     media_size_bytes: int | None,
 ) -> None:
-    for value, label in ((content_id, "content_id"), (transcription_job_id, "transcription_job_id")):
+    for value, label in (
+        (content_id, "content_id"),
+        (transcription_job_id, "transcription_job_id"),
+    ):
         if value:
             try:
                 UUID(value)
@@ -105,7 +117,9 @@ async def sweep_orphaned_spools(storage: Any, arq_pool: Any) -> int:
     """Boundedly reclaim old noncanonical spool objects after an API crash."""
     cutoff = datetime.now(UTC) - SPOOL_SWEEP_GRACE
     reclaimed = 0
-    for key, modified_at in await storage.list_objects("transcribe-jobs/", SPOOL_SWEEP_MAX_KEYS):
+    for key, modified_at in await storage.list_objects(
+        "transcribe-jobs/", SPOOL_SWEEP_MAX_KEYS
+    ):
         if modified_at.astimezone(UTC) > cutoff:
             continue
         parts = key.split("/", 2)
@@ -114,12 +128,19 @@ async def sweep_orphaned_spools(storage: Any, arq_pool: Any) -> int:
         try:
             info = await Job(parts[1], redis=arq_pool).info()
             args = getattr(info, "args", ()) if info is not None else ()
-            canonical_key = args[8] if getattr(info, "function", None) == "transcribe_task" and len(args) >= 9 else None
+            canonical_key = (
+                args[8]
+                if getattr(info, "function", None) == "transcribe_task"
+                and len(args) >= 9
+                else None
+            )
             if canonical_key != key:
                 await storage.delete_object(key)
                 reclaimed += 1
         except Exception as exc:
-            logger.warning("transcribe_spool_sweep_lookup_failed", key=key, error=str(exc))
+            logger.warning(
+                "transcribe_spool_sweep_lookup_failed", key=key, error=str(exc)
+            )
     return reclaimed
 
 
@@ -162,7 +183,9 @@ async def _mark_transcription_job_failed(
             "provider_error_code": "stt_not_ready",
             "metadata": {
                 "media_size_bytes": media_size_bytes,
-            } if media_size_bytes is not None else None,
+            }
+            if media_size_bytes is not None
+            else None,
         },
     )
 
@@ -202,7 +225,9 @@ async def transcribe(
     has_url = bool(url and url.strip())
     if has_file == has_url:
         raise TranscriptionError("Provide exactly one of audio_file or url")
-    _validate_transcription_metadata(content_id, transcription_job_id, language, media_size_bytes)
+    _validate_transcription_metadata(
+        content_id, transcription_job_id, language, media_size_bytes
+    )
     if has_file and audio_file is not None:
         _validate_audio_source(audio_file.filename, audio_file.content_type)
 
@@ -230,13 +255,19 @@ async def transcribe(
             # only when it has a stable path; otherwise copy into our validated
             # scratch directory so the provider never observes a dying handle.
             existing_path = getattr(audio_file.file, "name", None)
-            tmp_path = existing_path if isinstance(existing_path, str) and os.path.isfile(existing_path) else None
+            tmp_path = (
+                existing_path
+                if isinstance(existing_path, str) and os.path.isfile(existing_path)
+                else None
+            )
             try:
                 if tmp_path is None:
                     suffix = os.path.splitext(audio_file.filename)[1] or ".mp3"
                     fd, tmp_path = tempfile.mkstemp(
                         suffix=suffix,
-                        dir=getattr(request.app.state, "temp_dir", tempfile.gettempdir()),
+                        dir=getattr(
+                            request.app.state, "temp_dir", tempfile.gettempdir()
+                        ),
                     )
                     os.close(fd)
                     await _spool_upload_to_disk(audio_file, tmp_path, max_bytes)
@@ -304,7 +335,9 @@ async def submit_transcribe_job(
     has_url = bool(url and url.strip())
     if has_file == has_url:
         raise TranscriptionError("Provide exactly one of audio_file or url")
-    _validate_transcription_metadata(content_id, transcription_job_id, language, media_size_bytes)
+    _validate_transcription_metadata(
+        content_id, transcription_job_id, language, media_size_bytes
+    )
     if has_file and audio_file is not None:
         _validate_audio_source(audio_file.filename, audio_file.content_type)
 
@@ -435,7 +468,10 @@ async def submit_transcribe_job(
                 pass
         if not isinstance(exc, asyncio.CancelledError):
             await _mark_transcription_job_failed(
-                request, transcription_job_id, "Failed to enqueue transcription job", media_size_bytes
+                request,
+                transcription_job_id,
+                "Failed to enqueue transcription job",
+                media_size_bytes,
             )
         raise
 
@@ -559,7 +595,9 @@ async def cancel_transcribe_job(job_id: str, request: Request) -> JobCancelRespo
         ):
             storage_key = args[8]
     except Exception as exc:
-        logger.warning("transcribe_job_spool_lookup_failed", job_id=job_id, error=str(exc))
+        logger.warning(
+            "transcribe_job_spool_lookup_failed", job_id=job_id, error=str(exc)
+        )
 
     try:
         abort = getattr(job, "abort", None)
@@ -598,7 +636,9 @@ async def cancel_transcribe_job(job_id: str, request: Request) -> JobCancelRespo
             reason="abort requested; confirmation timed out (advisory)",
         )
     except Exception:
-        logger.warning("transcribe_job_cancel_failed", job_id=job_id, error_code="abort_failed")
+        logger.warning(
+            "transcribe_job_cancel_failed", job_id=job_id, error_code="abort_failed"
+        )
         return JobCancelResponse(
             job_id=job_id,
             status=str(status),
