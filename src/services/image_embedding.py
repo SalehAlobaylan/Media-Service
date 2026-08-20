@@ -69,6 +69,7 @@ class ImageEmbeddingService:
         image_bytes: bytes,
         content_id: str | None = None,
         artifact_recovery: dict[str, str] | None = None,
+        content_stage: dict[str, str] | None = None,
     ) -> ImageEmbedResponse:
         if not self.clip.is_loaded:
             image_embeddings_total.labels(status="failure").inc()
@@ -111,7 +112,7 @@ class ImageEmbeddingService:
 
         if content_id:
             status, error = await self._write_back(
-                content_id, vector, descriptor, artifact_recovery
+                content_id, vector, descriptor, artifact_recovery, content_stage
             )
             response.write_back_status = status
             response.write_back_error = error
@@ -123,10 +124,11 @@ class ImageEmbeddingService:
         url: str,
         content_id: str | None = None,
         artifact_recovery: dict[str, str] | None = None,
+        content_stage: dict[str, str] | None = None,
     ) -> ImageEmbedResponse:
         image_bytes = await self._download(url)
         return await self.embed_bytes(
-            image_bytes, content_id=content_id, artifact_recovery=artifact_recovery
+            image_bytes, content_id=content_id, artifact_recovery=artifact_recovery, content_stage=content_stage
         )
 
     async def _download(self, url: str) -> bytes:
@@ -140,6 +142,7 @@ class ImageEmbeddingService:
         vector: list[float],
         descriptor: dict | None = None,
         artifact_recovery: dict[str, str] | None = None,
+        content_stage: dict[str, str] | None = None,
     ) -> tuple[str, str | None]:
         if descriptor is None or not _is_writable_clip_descriptor(
             self.clip, descriptor
@@ -154,6 +157,7 @@ class ImageEmbeddingService:
                 space_id=descriptor.get("space_id") if descriptor else None,
                 producer_id=descriptor.get("producer_id") if descriptor else None,
                 artifact_recovery=artifact_recovery,
+                content_stage=content_stage,
             )
             logger.info("image_embedding_writeback_complete", content_id=content_id)
             return "ok", None

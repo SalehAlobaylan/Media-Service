@@ -81,6 +81,47 @@ class CMSClient:
             return None
         return ArtifactCoverageClaim.model_validate(result).model_dump(mode="json")
 
+    async def claim_content_stage(self) -> dict[str, Any] | None:
+        result = await self._request(
+            "POST",
+            "/internal/content-stages/media/claim",
+            json={},
+            metric_label="claim_content_stage",
+        )
+        return result or None
+
+    @staticmethod
+    def content_stage_correlation(claim: dict[str, Any]) -> dict[str, str]:
+        from uuid import uuid4
+
+        return {
+            "request_id": claim["request_id"],
+            "attempt_id": claim["attempt_id"],
+            "claim_token": claim["claim_token"],
+            "fence_token": claim["fence_token"],
+            "input_fingerprint": claim["input_fingerprint"],
+            "producer_event_id": str(uuid4()),
+        }
+
+    async def content_stage_transition(
+        self, claim: dict[str, Any], action: str, **extra: Any
+    ) -> None:
+        payload = {
+            "request_id": claim["request_id"],
+            "attempt_id": claim["attempt_id"],
+            "claim_token": claim["claim_token"],
+            "fence_token": claim["fence_token"],
+            "input_fingerprint": claim["input_fingerprint"],
+            "producer_event_id": "",
+            **extra,
+        }
+        await self._request(
+            "POST",
+            f"/internal/content-stages/{claim['request_id']}/{action}",
+            json=payload,
+            metric_label=f"content_stage_{action}",
+        )
+
     async def begin_artifact_coverage(self, request_id: str, claim_token: str) -> None:
         await self._request(
             "POST",
@@ -134,6 +175,7 @@ class CMSClient:
         language_probability: float | None = None,
         duration_sec: float | None = None,
         artifact_recovery: dict[str, str] | None = None,
+        content_stage: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "content_item_id": content_item_id,
@@ -160,6 +202,8 @@ class CMSClient:
             payload["duration_sec"] = duration_sec
         if artifact_recovery:
             payload["artifact_recovery"] = artifact_recovery
+        if content_stage:
+            payload["content_stage"] = content_stage
 
         return await self._request(
             "POST",
@@ -188,6 +232,7 @@ class CMSClient:
         space_id: str | None = None,
         producer_id: str | None = None,
         artifact_recovery: dict[str, str] | None = None,
+        content_stage: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Persist a 512-dim CLIP image embedding to content_items.image_embedding.
 
@@ -204,6 +249,8 @@ class CMSClient:
             payload["producer_id"] = producer_id
         if artifact_recovery:
             payload["artifact_recovery"] = artifact_recovery
+        if content_stage:
+            payload["content_stage"] = content_stage
         return await self._request(
             "PATCH",
             f"/internal/content-items/{content_id}/image-embedding",

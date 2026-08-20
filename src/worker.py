@@ -300,6 +300,135 @@ async def artifact_coverage_dispatch_tick(ctx: dict[str, Any]) -> None:
     )
 
 
+async def content_stage_dispatch_tick(ctx: dict[str, Any]) -> None:
+    claim = await ctx["cms_client"].claim_content_stage()
+    if not claim:
+        return
+    await ctx["redis"].enqueue_job(
+        "content_stage_transcript_task",
+        claim,
+        _job_id=claim["deterministic_job_id"],
+    )
+    await ctx["cms_client"].content_stage_transition(claim, "accepted")
+
+
+async def content_stage_transcript_task(
+    ctx: dict[str, Any], claim: dict[str, Any]
+) -> dict[str, str]:
+    cms: CMSClient = ctx["cms_client"]
+    if claim.get("stage") not in {"pods_transcript", "pods_image_embedding"}:
+        await cms.content_stage_transition(
+            claim,
+            "failed",
+            failure_class="unsupported_media_stage",
+            summary="Media worker only accepts pods_transcript",
+        )
+        return {"request_id": claim["request_id"], "state": "failed"}
+    await cms.content_stage_transition(claim, "begin")
+    stop = asyncio.Event()
+
+    async def heartbeat() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=15)
+                return
+            except TimeoutError:
+                await cms.content_stage_transition(claim, "heartbeat")
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        content = claim["bounded_input"]
+        if claim["stage"] == "pods_image_embedding":
+            image_url = content.get("thumbnail_url")
+            if not image_url:
+                await cms.content_stage_transition(
+                    claim,
+                    "failed",
+                    failure_class="invalid_input",
+                    summary="Image embedding stage has no CMS-approved thumbnail URL",
+                )
+                return {"request_id": claim["request_id"], "state": "failed"}
+            image_service = ImageEmbeddingService(
+                ctx["model_manager"].clip,
+                cms,
+                fetch_client=ctx.get("fetch_client"),
+                admission=ctx.get("workload_admission"),
+            )
+            response = await image_service.embed_url(
+                image_url,
+                content_id=claim["content_item_id"],
+                content_stage=cms.content_stage_correlation(claim),
+            )
+            if response.write_back_status != "ok":
+                await cms.content_stage_transition(
+                    claim, "uncertain", summary="Image embedding writeback outcome is unknown"
+                )
+                return {"request_id": claim["request_id"], "state": "uncertain"}
+            return {"request_id": claim["request_id"], "state": "verifying"}
+        caption = content.get("caption_artifact")
+        if isinstance(caption, dict):
+            full_text = caption.get("full_text")
+            segments = caption.get("segments")
+            if (
+                isinstance(full_text, str)
+                and full_text.strip()
+                and len(full_text) <= 2_000_000
+                and isinstance(segments, list)
+                and 0 < len(segments) <= 10_000
+            ):
+                chapters = caption.get("chapters")
+                await cms.create_transcript(
+                    content_item_id=claim["content_item_id"],
+                    full_text=full_text,
+                    language=str(caption.get("language") or "und"),
+                    segments=segments,
+                    chapters=chapters if isinstance(chapters, list) else None,
+                    source=str(caption.get("source") or "youtube_auto"),
+                    provider=str(caption.get("provider") or "youtube"),
+                    content_stage=cms.content_stage_correlation(claim),
+                )
+                return {"request_id": claim["request_id"], "state": "verifying"}
+        url = content.get("playback_url") or content.get("media_url")
+        if not url:
+            await cms.content_stage_transition(
+                claim,
+                "failed",
+                failure_class="invalid_input",
+                summary="Transcript stage has no CMS-approved media URL",
+            )
+            return {"request_id": claim["request_id"], "state": "failed"}
+        service = TranscriptionService(
+            ctx["model_manager"].stt,
+            cms,
+            temp_dir=ctx.get("temp_dir"),
+            fetch_client=ctx.get("fetch_client"),
+            admission=ctx.get("workload_admission"),
+        )
+        response = await service.transcribe_url(
+            url,
+            content_id=claim["content_item_id"],
+            word_timestamps=True,
+            content_stage=cms.content_stage_correlation(claim),
+        )
+        if response.write_back_status != "ok":
+            await cms.content_stage_transition(
+                claim, "uncertain", summary="Transcript writeback outcome is unknown"
+            )
+            return {"request_id": claim["request_id"], "state": "uncertain"}
+        return {"request_id": claim["request_id"], "state": "verifying"}
+    except Exception:
+        try:
+            await cms.content_stage_transition(
+                claim, "uncertain", summary="Transcript effect may have started"
+            )
+        except Exception:
+            pass
+        raise
+    finally:
+        stop.set()
+        await heartbeat_task
+
+
 async def artifact_coverage_task(
     ctx: dict[str, Any], claim: dict[str, Any]
 ) -> dict[str, str]:
@@ -391,13 +520,22 @@ def _build_redis_settings():
 class WorkerSettings:
     """arq picks this up via `arq src.worker.WorkerSettings`."""
 
-    functions = [transcribe_task, func(artifact_coverage_task, max_tries=1)]
+    functions = [
+        transcribe_task,
+        func(artifact_coverage_task, max_tries=1),
+        func(content_stage_transcript_task, max_tries=1),
+    ]
     cron_jobs = [
         cron(
             artifact_coverage_dispatch_tick,
             second={0, 10, 20, 30, 40, 50},
             run_at_startup=True,
-        )
+        ),
+        cron(
+            content_stage_dispatch_tick,
+            second={5, 15, 25, 35, 45, 55},
+            run_at_startup=True,
+        ),
     ]
     on_startup = _startup
     on_shutdown = _shutdown

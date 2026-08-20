@@ -80,6 +80,7 @@ class TranscriptionService:
         media_size_bytes: int | None = None,
         word_timestamps: bool = False,
         artifact_recovery: dict[str, str] | None = None,
+        content_stage: dict[str, str] | None = None,
     ) -> TranscribeResponse:
         model_size = self.stt.model_size
 
@@ -149,6 +150,7 @@ class TranscriptionService:
                 response,
                 transcription_job_id=transcription_job_id,
                 artifact_recovery=artifact_recovery,
+                content_stage=content_stage,
             )
             response.write_back_status = status
             response.write_back_error = error
@@ -179,6 +181,7 @@ class TranscriptionService:
         media_size_bytes: int | None = None,
         word_timestamps: bool = False,
         artifact_recovery: dict[str, str] | None = None,
+        content_stage: dict[str, str] | None = None,
     ) -> TranscribeResponse:
         try:
             audio_path = await self._download(url)
@@ -209,6 +212,7 @@ class TranscriptionService:
                 media_size_bytes=media_size_bytes,
                 word_timestamps=word_timestamps,
                 artifact_recovery=artifact_recovery,
+                content_stage=content_stage,
             )
         finally:
             self._cleanup(audio_path)
@@ -219,6 +223,7 @@ class TranscriptionService:
         result: TranscribeResponse,
         transcription_job_id: str | None = None,
         artifact_recovery: dict[str, str] | None = None,
+        content_stage: dict[str, str] | None = None,
     ) -> tuple[str, str | None]:
         """Persist transcript to CMS. Returns (status, error_message).
 
@@ -245,6 +250,7 @@ class TranscriptionService:
                     language_probability=result.language_probability,
                     duration_sec=result.duration_sec,
                     artifact_recovery=artifact_recovery,
+                    content_stage=content_stage,
                 )
                 logger.info("transcript_writeback_complete", content_id=content_id)
                 return "ok", None
