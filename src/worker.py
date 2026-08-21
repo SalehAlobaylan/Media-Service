@@ -14,7 +14,7 @@ import os
 import tempfile
 from typing import Any
 
-from arq import cron
+from arq import Retry, cron
 from arq.worker import func
 
 from redis.asyncio import Redis
@@ -74,8 +74,6 @@ async def _startup(ctx: dict[str, Any]) -> None:
     except Exception as exc:
         await cms_client.close()
         raise RuntimeError("Refusing worker startup: Redis is not reachable") from exc
-    finally:
-        await redis.aclose()
 
     ctx["settings"] = settings
     ctx["model_manager"] = model_manager
@@ -84,6 +82,7 @@ async def _startup(ctx: dict[str, Any]) -> None:
     ctx["temp_dir"] = temp_dir
     ctx["fetch_client"] = fetch_client
     ctx["workload_admission"] = admission
+    ctx["migration_redis"] = redis
     logger.info(
         "worker_ready",
         stt_provider=model_manager.stt.name,
@@ -108,6 +107,9 @@ async def _shutdown(ctx: dict[str, Any]) -> None:
     admission = ctx.get("workload_admission")
     if admission is not None:
         admission.shutdown()
+    migration_redis = ctx.get("migration_redis")
+    if migration_redis is not None:
+        await migration_redis.aclose()
     logger.info("worker_shutdown")
 
 
@@ -136,6 +138,9 @@ async def transcribe_task(
     - audio_path: legacy/co-located path where the worker shares the API's
       filesystem (e.g. the combined-container dev setup).
     """
+    migration_redis = ctx.get("migration_redis")
+    if migration_redis is not None and await migration_redis.exists("wahb:database-migration:media-quiesced"):
+        raise Retry(defer=5)
     # Restore the request-id contextvar so structured logs + outbound headers
     # in this worker process carry the same trace id as the enqueueing API call.
     token = _request_id_ctx.set(request_id) if request_id else None

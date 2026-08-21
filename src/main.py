@@ -24,6 +24,8 @@ from src.routes import embed_image, health, transcribe
 from src.services.workload import WorkloadAdmission
 from src.utils.logging import get_logger, setup_logging
 from src.utils.tempdir import resolve_media_temp_dir
+from src.migration_control import MigrationFenceMiddleware, router as migration_router
+from src.migration_control import owner as migration_owner
 
 
 @asynccontextmanager
@@ -57,6 +59,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     queue_manager = ArqPoolManager(settings)
     await queue_manager.start()
     arq_pool = queue_manager.pool
+
+    if arq_pool is not None:
+        try:
+            await migration_owner.restore(arq_pool)
+        except Exception as exc:
+            logger.error("migration_owner_restore_failed", reason=str(exc))
 
     if arq_pool is not None and storage_client.is_configured:
         try:
@@ -124,6 +132,7 @@ if _cors_origins:
 # Middleware (order matters — outermost first)
 app.add_middleware(LoggingMiddleware)
 app.add_middleware(RequestIDMiddleware)
+app.add_middleware(MigrationFenceMiddleware)
 
 # Prometheus metrics
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
@@ -132,6 +141,7 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 app.include_router(health.router)
 app.include_router(transcribe.router, prefix="/v1")
 app.include_router(embed_image.router, prefix="/v1")
+app.include_router(migration_router)
 
 # Error handlers
 for exc_class in (CircuitOpenError, TranscriptionError, ImageEmbeddingError):
