@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     CMS_SERVICE_TOKEN: str = ""
     CMS_BASE_URL: str = "http://localhost:8080"
     MEDIA_ROLE: str = "api"
+    # Worker-to-API route for the single local CLIP owner. Production provides
+    # the API service URL; local development keeps the loopback default.
+    MEDIA_API_BASE_URL: str = "http://127.0.0.1:5051"
 
     # STT engine selector (boot-time infra selector — Config Discipline). The
     # toggle/budget that govern WHEN STT runs live in the CMS transcription_config

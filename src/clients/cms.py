@@ -90,6 +90,83 @@ class CMSClient:
         )
         return result or None
 
+    async def get_artifact_manifest(self, manifest_id: str, tenant_id: str | None = None) -> dict[str, Any]:
+        suffix = f"?tenant_id={tenant_id}" if tenant_id else ""
+        return await self._request(
+            "GET",
+            f"/internal/artifact-manifests/{manifest_id}{suffix}",
+            metric_label="get_artifact_manifest",
+        )
+
+    async def create_artifact_manifest(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/internal/artifact-manifests",
+            json=payload,
+            metric_label="create_artifact_manifest",
+        )
+
+    async def transition_artifact_manifest(
+        self, manifest_id: str, state: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        body = dict(payload or {})
+        body["state"] = state
+        return await self._request(
+            "POST",
+            f"/internal/artifact-manifests/{manifest_id}/{state.replace('_', '-')}",
+            json=body,
+            metric_label=f"artifact_manifest_{state}",
+        )
+
+    async def create_transcription_generation(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/internal/transcription-generations",
+            json=payload,
+            metric_label="create_transcription_generation",
+        )
+
+    async def claim_transcription_segment(self) -> dict[str, Any] | None:
+        result = await self._request(
+            "POST",
+            "/internal/transcription-segments/claim",
+            json={},
+            metric_label="claim_transcription_segment",
+        )
+        return result or None
+
+    async def transition_transcription_segment(
+        self, segment_id: str, state: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/internal/transcription-segments/{segment_id}/{state}",
+            json=payload,
+            metric_label=f"transcription_segment_{state}",
+        )
+
+    async def heartbeat_transcription_segment(
+        self, segment_id: str, claim_token: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/internal/transcription-segments/{segment_id}/heartbeat",
+            json={"claim_token": claim_token},
+            metric_label="heartbeat_transcription_segment",
+        )
+
+    async def finalize_transcription_generation(
+        self, generation_id: str, content_stage: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/internal/transcription-generations/{generation_id}/finalize",
+            json={"content_stage": content_stage} if content_stage else {},
+            metric_label="finalize_transcription_generation",
+        )
+
     @staticmethod
     def content_stage_correlation(claim: dict[str, Any]) -> dict[str, str]:
         from uuid import uuid4

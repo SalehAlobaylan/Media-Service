@@ -10,9 +10,13 @@ Or via:  `make worker`
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import tempfile
 from typing import Any
+
+import httpx
 
 from arq import Retry, cron
 from arq.worker import func
@@ -27,7 +31,7 @@ from src.middleware.request_id import _request_id_ctx
 from src.models.manager import ModelManager
 from src.queue import build_redis_settings
 from src.services.transcription import TranscriptionService, provider_error_code
-from src.services.image_embedding import ImageEmbeddingService
+from src.services.segmented_audio import extract_audio_segment
 from src.services.workload import WorkloadAdmission
 from src.utils.logging import get_logger, setup_logging
 from src.utils.metrics import transcribe_jobs_total
@@ -54,15 +58,12 @@ async def _startup(ctx: dict[str, Any]) -> None:
     admission = WorkloadAdmission(stt_limit=1, clip_limit=1)
     temp_dir = resolve_media_temp_dir(settings.MEDIA_TEMP_DIR)
 
-    # Artifact recovery owns transcript and image-embedding claims, so both
-    # registered engines must be ready before this worker advertises liveness.
-    await model_manager.warmup(["stt", "clip"])
+    # The API is the sole CLIP owner. This worker only needs STT and forwards
+    # durable image claims to the authenticated API route.
+    await model_manager.warmup(["stt"])
     if not model_manager.stt.is_loaded:
         await cms_client.close()
         raise RuntimeError("Refusing worker startup: STT provider is not ready")
-    if not model_manager.clip.is_loaded:
-        await cms_client.close()
-        raise RuntimeError("Refusing worker startup: CLIP provider is not ready")
 
     if not await cms_client.health_check():
         await cms_client.close()
@@ -89,6 +90,36 @@ async def _startup(ctx: dict[str, Any]) -> None:
         stt_loaded=model_manager.stt.is_loaded,
         storage=storage_client.is_configured,
     )
+
+
+async def _embed_via_api(
+    ctx: dict[str, Any],
+    image_url: str,
+    content_id: str,
+    *,
+    content_stage: dict[str, str] | None = None,
+    artifact_recovery: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    settings: Settings = ctx["settings"]
+    token = settings.service_auth_token
+    if not token:
+        raise RuntimeError("Media API token is unavailable for image embedding")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
+        response = await client.post(
+            f"{settings.MEDIA_API_BASE_URL.rstrip('/')}/v1/embed/image",
+            data={
+                "url": image_url,
+                "content_id": content_id,
+                "content_stage_json": json.dumps(content_stage) if content_stage else "",
+                "artifact_recovery_json": json.dumps(artifact_recovery) if artifact_recovery else "",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("Media API returned invalid image embedding response")
+    return payload
 
 
 async def _shutdown(ctx: dict[str, Any]) -> None:
@@ -343,6 +374,11 @@ async def content_stage_transcript_task(
     heartbeat_task = asyncio.create_task(heartbeat())
     try:
         content = claim["bounded_input"]
+        long_form_generation = await ensure_long_form_transcription_generation(ctx, claim, content)
+        if long_form_generation is not None:
+            # The durable segment dispatcher owns the actual STT work. The
+            # stage remains verifiable until CMS observes the merged transcript.
+            return {"request_id": claim["request_id"], "state": "verifying"}
         if claim["stage"] == "pods_image_embedding":
             image_url = content.get("thumbnail_url")
             if not image_url:
@@ -353,18 +389,11 @@ async def content_stage_transcript_task(
                     summary="Image embedding stage has no CMS-approved thumbnail URL",
                 )
                 return {"request_id": claim["request_id"], "state": "failed"}
-            image_service = ImageEmbeddingService(
-                ctx["model_manager"].clip,
-                cms,
-                fetch_client=ctx.get("fetch_client"),
-                admission=ctx.get("workload_admission"),
-            )
-            response = await image_service.embed_url(
-                image_url,
-                content_id=claim["content_item_id"],
+            response = await _embed_via_api(
+                ctx, image_url, claim["content_item_id"],
                 content_stage=cms.content_stage_correlation(claim),
             )
-            if response.write_back_status != "ok":
+            if response.get("write_back_status") != "ok":
                 await cms.content_stage_transition(
                     claim, "uncertain", summary="Image embedding writeback outcome is unknown"
                 )
@@ -434,6 +463,209 @@ async def content_stage_transcript_task(
         await heartbeat_task
 
 
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+async def ensure_long_form_transcription_generation(
+    ctx: dict[str, Any], claim: dict[str, Any], content: dict[str, Any]
+) -> dict[str, Any] | None:
+    duration_raw = content.get("duration_sec")
+    try:
+        duration_sec = float(duration_raw or 0)
+    except (TypeError, ValueError):
+        duration_sec = 0
+    if duration_sec <= 2400:
+        return None
+    url = content.get("playback_url") or content.get("media_url")
+    if not isinstance(url, str) or not url.strip():
+        raise RuntimeError("long-form transcript stage has no CMS-approved playback URL")
+
+    settings: Settings = ctx["settings"]
+    cms: CMSClient = ctx["cms_client"]
+    content_id = str(claim["content_item_id"])
+    tenant_id = str(claim.get("tenant_id") or "default")
+    provider = ctx["model_manager"].stt.name
+    model = ctx["model_manager"].stt.model_size
+    language = str(content.get("content_language") or settings.STT_DEFAULT_LANGUAGE)
+    input_digest = _digest(f"long-form-analysis-audio:v1|{url}|{duration_sec:.3f}|{language}|{provider}|{model}")
+    existing_manifest_id = content.get("analysis_audio_manifest_id")
+    if not isinstance(existing_manifest_id, str) or not existing_manifest_id.strip():
+        # A repaired/legacy parent may reuse its source manifest only when the
+        # CMS already proves it is audio. Never invent a verified manifest for
+        # an arbitrary public URL; Aggregation must first materialize and
+        # verify analysis audio for a video source.
+        existing_manifest_id = content.get("media_artifact_manifest_id")
+        if not isinstance(existing_manifest_id, str) or not existing_manifest_id.strip():
+            raise RuntimeError("long-form transcription requires a manifest-owned analysis-audio artifact")
+    manifest = await cms.get_artifact_manifest(existing_manifest_id, tenant_id)
+    manifest_content_type = str(manifest.get("content_type") or "").lower()
+    if not manifest_content_type.startswith("audio/"):
+        raise RuntimeError("long-form transcription source manifest is not audio")
+    if str(manifest.get("state") or "") not in {"verified", "active"}:
+        raise RuntimeError("long-form transcription source manifest is not verified")
+    url = str(manifest.get("public_url") or content.get("analysis_audio_url") or url)
+    if not url.strip():
+        raise RuntimeError("long-form transcription manifest has no public URL")
+    input_digest = _digest(f"long-form-analysis-audio:v1|{url}|{duration_sec:.3f}|{language}|{provider}|{model}")
+
+    segment_length_ms = 15 * 60 * 1000
+    overlap_ms = 5_000
+    total_ms = max(1, int(duration_sec * 1000))
+    segments: list[dict[str, Any]] = []
+    index = 0
+    target_start = 0
+    while target_start < total_ms:
+        target_end = min(total_ms, target_start + segment_length_ms)
+        start_ms = max(0, target_start - (overlap_ms if target_start else 0))
+        segment_digest = _digest(f"{input_digest}|{index}|{start_ms}|{target_end}|{overlap_ms}")
+        segments.append({
+            "start_ms": start_ms,
+            "end_ms": target_end,
+            "overlap_ms": target_start - start_ms,
+            "source_digest": input_digest,
+            "segment_digest": segment_digest,
+            "artifact_manifest_id": manifest["id"],
+        })
+        index += 1
+        target_start = target_end
+    return await cms.create_transcription_generation({
+        "tenant_id": tenant_id,
+        "content_item_id": content_id,
+        "transcription_job_id": claim["request_id"],
+        "input_digest": input_digest,
+        "analysis_audio_manifest_id": manifest["id"],
+        "provider": provider,
+        "model": model,
+        "language": language,
+        "content_stage": cms.content_stage_correlation(claim),
+        "segments": segments,
+    })
+
+
+async def transcription_segment_dispatch_tick(ctx: dict[str, Any]) -> None:
+    claim = await ctx["cms_client"].claim_transcription_segment()
+    if not claim:
+        return
+    unit = claim.get("unit") or {}
+    unit_id = str(unit.get("id") or "")
+    attempt = str(unit.get("attempt_count") or "0")
+    if not unit_id:
+        return
+    await ctx["redis"].enqueue_job(
+        "transcription_segment_task",
+        claim,
+        _job_id=f"transcription-segment-{unit_id}-{attempt}",
+    )
+
+
+async def transcription_segment_task(ctx: dict[str, Any], claim: dict[str, Any]) -> dict[str, str]:
+    cms: CMSClient = ctx["cms_client"]
+    unit = claim.get("unit") or {}
+    generation = claim.get("generation") or {}
+    unit_id = str(unit["id"])
+    claim_token = str(unit["claim_token"])
+    manifest_id = unit.get("artifact_manifest_id") or generation.get("analysis_audio_manifest_id")
+    if not manifest_id:
+        await cms.transition_transcription_segment(unit_id, "failed", {
+            "claim_token": claim_token,
+            "failure_class": "missing_analysis_audio_manifest",
+            "summary": "segment has no analysis-audio manifest",
+        })
+        return {"segment_id": unit_id, "state": "failed"}
+    manifest = await cms.get_artifact_manifest(str(manifest_id), str(generation.get("tenant_id") or "default"))
+    url = manifest.get("public_url")
+    if not isinstance(url, str) or not url.strip():
+        await cms.transition_transcription_segment(unit_id, "failed", {
+            "claim_token": claim_token,
+            "failure_class": "missing_analysis_audio_url",
+            "summary": "analysis-audio manifest has no public URL",
+        })
+        return {"segment_id": unit_id, "state": "failed"}
+
+    stop = asyncio.Event()
+
+    async def heartbeat() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=15)
+                return
+            except TimeoutError:
+                await cms.heartbeat_transcription_segment(unit_id, claim_token)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    local_path: str | None = None
+    try:
+        start_ms = int(unit["start_ms"])
+        end_ms = int(unit["end_ms"])
+        fd, local_path = tempfile.mkstemp(suffix=".wav", prefix=f"transcript-segment-{unit_id}-", dir=ctx.get("temp_dir"))
+        os.close(fd)
+        await extract_audio_segment(
+            url,
+            local_path,
+            start_ms,
+            end_ms,
+            timeout_sec=max(1800, int(ctx["settings"].TRANSCRIBE_TIMEOUT_SEC) * 2),
+            trusted_cms_source=True,
+        )
+        service = TranscriptionService(
+            ctx["model_manager"].stt,
+            cms,
+            temp_dir=ctx.get("temp_dir"),
+            admission=ctx.get("workload_admission"),
+        )
+        response = await service.transcribe_file(
+            local_path,
+            language=str(generation.get("language") or ctx["settings"].STT_DEFAULT_LANGUAGE),
+            word_timestamps=True,
+        )
+        segments = [segment.model_dump() for segment in response.segments]
+        await cms.transition_transcription_segment(unit_id, "verified", {
+            "claim_token": claim_token,
+            "transcript_text": response.text,
+            "transcript_segments": segments,
+            "summary": "segment transcription verified",
+            "artifact_manifest_ids": [str(manifest_id)],
+        })
+        try:
+            await cms.finalize_transcription_generation(str(generation["id"]), _generation_content_stage(generation))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409 or "TRANSCRIPTION_INCOMPLETE" not in exc.response.text:
+                raise
+        return {"segment_id": unit_id, "state": "verified"}
+    except Exception as exc:
+        try:
+            await cms.transition_transcription_segment(unit_id, "failed", {
+                "claim_token": claim_token,
+                "failure_class": provider_error_code(exc),
+                "summary": str(exc)[-1000:],
+            })
+        except Exception:
+            logger.exception("transcription_segment_failure_receipt_failed", segment_id=unit_id)
+        raise
+    finally:
+        stop.set()
+        await heartbeat_task
+        if local_path and os.path.exists(local_path):
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
+
+
+def _generation_content_stage(generation: dict[str, Any]) -> dict[str, str] | None:
+    proof = generation.get("terminal_proof")
+    if not isinstance(proof, dict):
+        return None
+    value = proof.get("content_stage")
+    if not isinstance(value, dict):
+        return None
+    required = ("request_id", "attempt_id", "claim_token", "fence_token", "input_fingerprint", "producer_event_id")
+    if not all(isinstance(value.get(key), str) and value[key] for key in required):
+        return None
+    return {key: str(value[key]) for key in required}
+
+
 async def artifact_coverage_task(
     ctx: dict[str, Any], claim: dict[str, Any]
 ) -> dict[str, str]:
@@ -487,16 +719,10 @@ async def artifact_coverage_task(
             url = content.get("thumbnail_url") or content.get("media_url")
             if not url:
                 raise RuntimeError("CMS image claim has no image URL")
-            service = ImageEmbeddingService(
-                model_manager.clip,
-                cms,
-                fetch_client=ctx.get("fetch_client"),
-                admission=ctx.get("workload_admission"),
+            response = await _embed_via_api(
+                ctx, url, content["id"], artifact_recovery=correlation
             )
-            response = await service.embed_url(
-                url, content_id=content["id"], artifact_recovery=correlation
-            )
-            if response.write_back_status != "ok":
+            if response.get("write_back_status") != "ok":
                 raise RuntimeError("image recovery was not persisted")
         else:
             raise RuntimeError("CMS returned an artifact outside Media capability")
@@ -529,6 +755,7 @@ class WorkerSettings:
         transcribe_task,
         func(artifact_coverage_task, max_tries=1),
         func(content_stage_transcript_task, max_tries=1),
+        func(transcription_segment_task, max_tries=1),
     ]
     cron_jobs = [
         cron(
@@ -539,6 +766,11 @@ class WorkerSettings:
         cron(
             content_stage_dispatch_tick,
             second={5, 15, 25, 35, 45, 55},
+            run_at_startup=True,
+        ),
+        cron(
+            transcription_segment_dispatch_tick,
+            second={2, 12, 22, 32, 42, 52},
             run_at_startup=True,
         ),
     ]
@@ -560,4 +792,4 @@ class WorkerSettings:
     allow_abort_jobs = True
     # Long jobs need long timeouts; hosted providers still process long podcasts
     # asynchronously and can take several minutes end to end.
-    job_timeout = 1800  # 30 min
+    job_timeout = 3600  # long-form segment extraction + STT

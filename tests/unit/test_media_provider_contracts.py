@@ -123,6 +123,8 @@ async def test_image_writeback_forwards_resolved_vector_space_identity() -> None
         model="clip-ViT-B-32",
         space_id="clip-space",
         producer_id="clip-producer",
+        artifact_recovery=None,
+        content_stage=None,
     )
 
 
