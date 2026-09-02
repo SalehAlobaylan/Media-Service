@@ -32,11 +32,10 @@ def test_production_never_falls_back_to_cms_token_for_inbound_auth() -> None:
     assert any("MEDIA_SERVICE_TOKEN" in error for error in errors)
 
 
-def test_role_and_partial_storage_contract_are_startup_errors() -> None:
-    settings = _production_settings(MEDIA_ROLE="worker", S3_BUCKET="only-a-bucket")
+def test_role_mismatch_is_a_startup_error() -> None:
+    settings = _production_settings(MEDIA_ROLE="worker")
     errors, _ = settings.validate_startup(expected_role="api")
     assert any("MEDIA_ROLE" in error for error in errors)
-    assert any("S3 configuration" in error for error in errors)
 
 
 def test_service_auth_accepts_current_and_previous_rotation_tokens(client) -> None:

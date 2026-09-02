@@ -13,11 +13,11 @@ It does **not** run text embeddings, LLM ops, FFmpeg transcoding, pipeline orche
 | Capability | Model / impl | Endpoint |
 |------------|--------------|----------|
 | Speech-to-text (sync, short clips) | Deepgram Nova-3 (default) / faster-whisper | `POST /v1/transcribe` |
-| Speech-to-text (async, long-form) | arq queue + R2/S3 spool | `POST /v1/transcribe/jobs`, `GET`/`DELETE /v1/transcribe/jobs/:id` |
+| Speech-to-text (async, long-form) | arq queue + durable media reference | `POST /v1/transcribe/jobs`, `GET`/`DELETE /v1/transcribe/jobs/:id` |
 | Image embedding | CLIP-ViT-B-32 (sentence-transformers, 512-dim) | `POST /v1/embed/image` |
 | Models registry | — | `GET /v1/models` |
-| Liveness / readiness | model + CMS check | `GET /health`, `GET /ready` |
-| Queue depth | arq probe | `GET /health/queue` |
+| Liveness / readiness | models + CMS | `GET /health`, `GET /ready` |
+| Queue depth | arq worker liveness + throughput | `GET /health/queue` |
 | Prometheus metrics | `media_*` prefix | `GET /metrics` |
 
 The STT engine sits behind a stable HTTP boundary so it can be swapped (Deepgram, faster-whisper, a Saudi-tuned model, …) without rippling into Aggregation or CMS. Default is **Deepgram Nova-3** (`STT_PROVIDER=deepgram`, chosen for Arabic dialect + code-switching coverage); **faster-whisper** is the local/self-hosted alternative.
@@ -48,7 +48,7 @@ make docker-build          # API image (Dockerfile)
 
 ## Async transcription (how it works)
 
-Long audio doesn't block the API: `POST /v1/transcribe/jobs` streams the upload to **object storage (Cloudflare R2 / S3)**, enqueues only the object key to Redis (db=2), and returns a `job_id`. The separate **worker** downloads the object, transcribes, writes back to CMS, and deletes the object on success. So API and worker need **no shared filesystem** — queued audio lives in R2, not on disk. `url`-based jobs skip storage (the worker fetches the URL directly). Without `S3_*` config, async *file uploads* return 503 while the sync route and url-jobs still work.
+Long audio does not block the API: `POST /v1/transcribe/jobs` accepts one CMS- or Aggregation-approved durable URL, enqueues that reference in Redis (db=2), and returns a `job_id`. The separate worker downloads the reference only when executing, transcribes it in worker-local scratch, writes back to CMS, and removes local scratch. Async multipart submissions are rejected; user uploads must first be persisted through CMS → Aggregation. API and worker therefore need no shared filesystem or duplicate object-storage bucket.
 
 ## Configuration
 
@@ -72,14 +72,8 @@ Long audio doesn't block the API: `POST /v1/transcribe/jobs` streams the upload 
 | `MAX_UPLOAD_MB` | no | 200 | Upload cap |
 | `TRANSCRIBE_TIMEOUT_SEC` | no | 600 | Transcription timeout |
 | `REDIS_URL` / `ARQ_REDIS_DB` | no | redis://localhost:6379 / 2 | arq queue (db=2 — isolated from Aggregation db=0, Enrichment db=1) |
-| `S3_ENDPOINT_URL` / `S3_BUCKET` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | for async file jobs | — | R2/S3 spool (all four required) |
-| `S3_REGION` / `S3_CDN_URL` | no | auto / — | R2 region / CDN base |
 | `CB_FAILURE_THRESHOLD` / `CB_RESET_TIMEOUT_SEC` / `CB_HALF_OPEN_REQUESTS` | no | 5 / 30 / 3 | CMS circuit breaker |
 | `CORS_ALLOWED_ORIGINS` | no | * | CSV; "" disables CORS |
-
-### R2 orphan cleanup (ops)
-
-The worker deletes the audio object on success; objects from terminal failures are swept by a bucket **lifecycle rule** on the `transcribe-jobs/` prefix (1-day expiry). Set it once per environment — `scripts/set_r2_lifecycle.py` (needs a bucket-admin R2 token) or the Cloudflare dashboard.
 
 ## Commands
 
@@ -110,10 +104,10 @@ src/
 ├── routes/        # transcribe, embed_image, health
 ├── schemas/       # Pydantic response shapes
 ├── models/        # ModelManager (loads/warms Whisper + CLIP)
-├── clients/       # CMS write-back client (circuit breaker) + S3/R2 storage client
+├── clients/       # CMS write-back and safe-fetch clients
 └── middleware/    # logging, request-id, error handler
 tests/             # unit + integration
-scripts/           # set_r2_lifecycle.py, model download
+scripts/           # model download
 Dockerfile         # API image
 Dockerfile.worker  # arq worker image (same source, worker entrypoint)
 ```

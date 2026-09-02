@@ -65,7 +65,6 @@ async def ready(request: Request, response: Response) -> ReadyResponse:
 
     models_status = model_manager.is_ready
     cms_reachable = await cms_client.health_check()
-
     all_ready = model_manager.all_ready and cms_reachable
 
     if not all_ready:

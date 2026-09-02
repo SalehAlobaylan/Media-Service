@@ -11,26 +11,6 @@ from typing import Any
 from src.models.whisper import TranscribeResult
 
 
-class RecordingStorage:
-    is_configured = True
-
-    def __init__(self, payload: bytes = b"audio") -> None:
-        self.payload = payload
-        self.calls: list[tuple[str, str]] = []
-
-    async def upload_fileobj(self, fileobj: Any, key: str, **_: Any) -> None:
-        fileobj.read()
-        self.calls.append(("upload", key))
-
-    async def download_to_path(self, key: str, dest_path: str) -> None:
-        with open(dest_path, "wb") as destination:
-            destination.write(self.payload)
-        self.calls.append(("download", key))
-
-    async def delete_object(self, key: str) -> None:
-        self.calls.append(("delete", key))
-
-
 class RecordingCMS:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []

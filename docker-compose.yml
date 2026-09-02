@@ -13,17 +13,13 @@ services:
       CMS_MEDIA_SERVICE_TOKEN: dev-service-token
       REDIS_URL: redis://host.docker.internal:6380
       ARQ_REDIS_DB: "2"
-      S3_ENDPOINT_URL: http://host.docker.internal:9000
-      S3_ACCESS_KEY_ID: minioadmin
-      S3_SECRET_ACCESS_KEY: minioadmin
-      S3_BUCKET: wahb-media
       MEDIA_TEMP_DIR: /tmp/wahb-media
     ports:
       - "5051:5051"
     tmpfs:
       - /tmp/wahb-media:rw,size=2g
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:5051/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:5051/ready"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -42,7 +38,7 @@ services:
     tmpfs:
       - /tmp/wahb-media:rw,size=8g
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://media-api:5051/health/queue', timeout=5)); assert d['reachable'] and d['worker_alive']"]
       interval: 15s
       timeout: 5s
       retries: 5

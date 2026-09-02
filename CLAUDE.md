@@ -78,22 +78,12 @@ ready, and metrics endpoints are unauthenticated.
 (5 failures → open, 30s reset). Same shape as Enrichment-Service.
 
 **arq async jobs**: Long transcriptions go through `POST /v1/transcribe/jobs`.
-The API streams the uploaded audio to **object storage (Cloudflare R2 / S3)**
-and enqueues only the object key to Redis (db=2), returning a job ID. The
-worker process (a separate deployment — its own image, `Dockerfile.worker`)
-downloads the object from R2 to its own temp dir, runs Whisper, and deletes the
-object on success. Queued audio therefore lives in R2, not on the API's disk,
-and the API + worker need **no shared filesystem**. `url`-based jobs skip
-storage (the worker downloads the URL directly). The API never blocks on
-transcription. Requires `S3_*` env on both the API and worker; without it,
-async *file uploads* 503 (sync transcribe + url jobs still work).
-
-**R2 orphan cleanup (ops):** the worker deletes the audio object on success;
-objects from terminal failures are swept by a bucket **lifecycle rule** that
-expires the `transcribe-jobs/` prefix after 1 day. Set it once per environment —
-`scripts/set_r2_lifecycle.py` (needs a bucket-admin R2 token), or the Cloudflare
-dashboard: R2 → bucket → Settings → Object lifecycle rules → prefix
-`transcribe-jobs/`, delete 1 day after creation.
+The API accepts one verified durable URL, enqueues that URL to Redis (db=2), and
+returns a job ID. The separate worker downloads it only while executing into its
+own bounded temp directory, runs STT, writes back to CMS, and always cleans local
+scratch. Async multipart input is rejected: uploads must first be persisted by
+CMS → Aggregation. The API never blocks on transcription and no Media-owned
+object-storage spool or shared filesystem is required.
 
 **X-Request-ID propagation**: Inbound `X-Request-ID` is bound to a contextvar
 and forwarded to outbound CMS writes — so a single trace ID flows

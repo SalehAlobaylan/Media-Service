@@ -52,6 +52,7 @@ def test_queue_status_worker_alive_parses_counts(client) -> None:
     pool.get.return_value = (
         b"May-29 14:00:00 j_complete=10 j_failed=2 j_retried=1 j_ongoing=1 queued=3"
     )
+    pool.zrangebyscore.return_value = []
     app.state.arq_pool = pool
     try:
         r = client.get("/health/queue")
@@ -77,6 +78,7 @@ def test_queue_status_worker_down(client) -> None:
     pool = AsyncMock()
     pool.zcard.return_value = 0
     pool.get.return_value = None
+    pool.zrangebyscore.return_value = []
     app.state.arq_pool = pool
     try:
         r = client.get("/health/queue")

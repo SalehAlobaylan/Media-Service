@@ -22,7 +22,7 @@ def test_async_transcription_validates_source_before_redis_availability(
 ) -> None:
     response = client.post("/v1/transcribe/jobs", headers=auth_headers)
     assert response.status_code == 422
-    assert response.json()["error_code"] == "TRANSCRIPTION_FAILED"
+    assert response.json()["error_code"] == "ASYNC_TRANSCRIPTION_URL_REQUIRED"
 
 
 def test_transcription_rejects_invalid_typed_metadata_before_queueing(

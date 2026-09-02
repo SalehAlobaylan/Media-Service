@@ -1,7 +1,6 @@
 import asyncio
 import os
 import tempfile
-from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -11,8 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from pydantic import BaseModel
 
 from src.auth.service_auth import verify_service_token
-from src.clients.storage import StorageUploadTooLargeError
-from src.middleware.error_handler import TranscriptionError
+from src.middleware.error_handler import AsyncTranscriptionURLRequiredError, TranscriptionError
 from src.middleware.request_id import current_request_id
 from src.schemas.transcribe import TranscribeResponse
 from src.services.transcription import TranscriptionService
@@ -24,8 +22,6 @@ logger = get_logger(__name__)
 router = APIRouter(dependencies=[Depends(verify_service_token)])
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MB
-SPOOL_SWEEP_GRACE = timedelta(minutes=15)
-SPOOL_SWEEP_MAX_KEYS = 100
 SUPPORTED_LANGUAGES = {"ar", "en", "multi"}
 ALLOWED_AUDIO_SUFFIXES = {
     ".mp3",
@@ -111,37 +107,6 @@ def _validate_audio_source(filename: str | None, content_type: str | None) -> No
         content_type.startswith("audio/") or content_type in {"video/mp4", "video/webm"}
     ):
         raise TranscriptionError("Unsupported media type")
-
-
-async def sweep_orphaned_spools(storage: Any, arq_pool: Any) -> int:
-    """Boundedly reclaim old noncanonical spool objects after an API crash."""
-    cutoff = datetime.now(UTC) - SPOOL_SWEEP_GRACE
-    reclaimed = 0
-    for key, modified_at in await storage.list_objects(
-        "transcribe-jobs/", SPOOL_SWEEP_MAX_KEYS
-    ):
-        if modified_at.astimezone(UTC) > cutoff:
-            continue
-        parts = key.split("/", 2)
-        if len(parts) != 3 or not parts[1].startswith("transcribe:"):
-            continue
-        try:
-            info = await Job(parts[1], redis=arq_pool).info()
-            args = getattr(info, "args", ()) if info is not None else ()
-            canonical_key = (
-                args[8]
-                if getattr(info, "function", None) == "transcribe_task"
-                and len(args) >= 9
-                else None
-            )
-            if canonical_key != key:
-                await storage.delete_object(key)
-                reclaimed += 1
-        except Exception as exc:
-            logger.warning(
-                "transcribe_spool_sweep_lookup_failed", key=key, error=str(exc)
-            )
-    return reclaimed
 
 
 async def _spool_upload_to_disk(
@@ -317,32 +282,44 @@ async def transcribe(
 )
 async def submit_transcribe_job(
     request: Request,
-    audio_file: UploadFile | None = File(None),
-    url: str | None = Form(None),
-    content_id: str | None = Form(None),
-    transcription_job_id: str | None = Form(None),
-    language: str | None = Form(None),
-    media_size_bytes: int | None = Form(None),
-    word_timestamps: bool = Form(False),
 ) -> JobAcceptedResponse:
     """Enqueue an async transcription job. Use for long-form (>2 min) audio.
 
     The worker process (separate from this API) consumes from Redis and runs
     the transcription. Poll GET /v1/transcribe/jobs/{id} for status.
     """
-    settings = request.app.state.settings
-    has_file = bool(audio_file and audio_file.filename)
-    has_url = bool(url and url.strip())
-    if has_file == has_url:
-        raise TranscriptionError("Provide exactly one of audio_file or url")
+    form = await request.form()
+    audio_file = form.get("audio_file")
+    raw_url = form.get("url")
+    raw_content_id = form.get("content_id")
+    raw_job_id = form.get("transcription_job_id")
+    raw_language = form.get("language")
+    raw_size = form.get("media_size_bytes")
+    raw_timestamps = form.get("word_timestamps", False)
+    url = raw_url.strip() if isinstance(raw_url, str) else None
+    content_id = raw_content_id if isinstance(raw_content_id, str) else None
+    transcription_job_id = raw_job_id if isinstance(raw_job_id, str) else None
+    language = raw_language if isinstance(raw_language, str) else None
+    try:
+        media_size_bytes = int(raw_size) if isinstance(raw_size, str) and raw_size else None
+    except ValueError as exc:
+        raise TranscriptionError("media_size_bytes must be an integer") from exc
+    word_timestamps = str(raw_timestamps).lower() in {"1", "true", "yes", "on"}
+    has_file = isinstance(audio_file, UploadFile) and bool(audio_file.filename)
+    has_url = bool(url)
+    if has_file:
+        raise AsyncTranscriptionURLRequiredError(
+            "Async transcription accepts only url; persist uploads through Aggregation first"
+        )
+    if not has_url:
+        raise AsyncTranscriptionURLRequiredError(
+            "Async transcription accepts only url; persist uploads through Aggregation first"
+        )
     _validate_transcription_metadata(
         content_id, transcription_job_id, language, media_size_bytes
     )
-    if has_file and audio_file is not None:
-        _validate_audio_source(audio_file.filename, audio_file.content_type)
 
     arq_pool = await _get_arq_pool(request)
-    storage = request.app.state.storage_client
 
     if arq_pool is None:
         await _mark_transcription_job_failed(
@@ -356,62 +333,11 @@ async def submit_transcribe_job(
             detail="Async transcription unavailable: Redis (arq) not reachable",
         )
 
-    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
-
-    # Same Content-Length gate as the sync route.
-    if audio_file is not None:
-        content_length = request.headers.get("content-length")
-        if (
-            content_length
-            and content_length.isdigit()
-            and int(content_length) > max_bytes + UPLOAD_CHUNK_SIZE
-        ):
-            await _mark_transcription_job_failed(
-                request,
-                transcription_job_id,
-                f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB",
-                media_size_bytes,
-            )
-            raise TranscriptionError(
-                f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB"
-            )
-
-    # Uploads are streamed to object storage (R2) rather than the API's local
-    # disk: queued audio then lives in R2 (not piling up on the server while it
-    # waits for a worker), and the separate worker container can fetch it
-    # without a shared filesystem. URL-based jobs skip storage entirely — the
-    # worker downloads the URL directly.
-    storage_key: str | None = None
     dedupe_key = transcription_job_id or content_id
     dedupe_id = f"transcribe:{dedupe_key}" if dedupe_key else None
     job_id = dedupe_id or f"transcribe:{uuid4().hex}"
     enqueue_attempted = False
     try:
-        if has_file and audio_file is not None:
-            if not storage.is_configured:
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "Async file uploads require object storage (S3_* not "
-                        "configured). Submit a URL, or configure R2/S3."
-                    ),
-                )
-            suffix = os.path.splitext(audio_file.filename)[1] or ".mp3"
-            # Preallocate the exact ARQ id, so a bounded sweeper can later
-            # prove whether this uploaded object is the job's canonical source.
-            storage_key = f"transcribe-jobs/{job_id}/{uuid4().hex}{suffix}"
-            try:
-                await storage.upload_fileobj(
-                    audio_file.file,
-                    storage_key,
-                    content_type=audio_file.content_type,
-                    max_bytes=max_bytes,
-                )
-            except StorageUploadTooLargeError as exc:
-                raise TranscriptionError(
-                    f"Upload exceeds maximum size of {settings.MAX_UPLOAD_MB} MB"
-                ) from exc
-
         # Forward the current request_id into the job so the worker logs line
         # up with this API call when debugging cross-process traces.
         request_id = current_request_id()
@@ -421,14 +347,12 @@ async def submit_transcribe_job(
         enqueue_attempted = True
         job = await arq_pool.enqueue_job(
             "transcribe_task",
-            None,  # audio_path — unused now that uploads go through storage
             url,
             content_id,
             transcription_job_id,
             language,
             word_timestamps,
             request_id,
-            storage_key,
             media_size_bytes,
             _job_id=job_id,
         )
@@ -436,12 +360,6 @@ async def submit_transcribe_job(
             # arq returns None when a job with this id already exists (queued,
             # in-progress, or recently completed) — it's already being handled.
             if dedupe_id is not None:
-                # This request owns a fresh object, but the existing ARQ job
-                # owns the canonical source. Never leave the duplicate object
-                # for the lifecycle sweep and never delete the existing key.
-                if storage_key and storage.is_configured:
-                    await storage.delete_object(storage_key)
-                    storage_key = None
                 logger.info(
                     "transcribe_job_deduped", job_id=dedupe_id, content_id=content_id
                 )
@@ -453,19 +371,12 @@ async def submit_transcribe_job(
             "transcribe_job_queued",
             job_id=job.job_id,
             content_id=content_id,
-            storage_key=storage_key,
-            url_host=safe_url_host(url) if url else None,
+            url_host=safe_url_host(url),
         )
         return JobAcceptedResponse(job_id=job.job_id)
     except BaseException as exc:
         if enqueue_attempted:
             await _mark_arq_unavailable(request, arq_pool)
-        # Object was uploaded but enqueue failed — remove it so it doesn't orphan.
-        if storage_key and storage.is_configured:
-            try:
-                await storage.delete_object(storage_key)
-            except Exception:
-                pass
         if not isinstance(exc, asyncio.CancelledError):
             await _mark_transcription_job_failed(
                 request,
@@ -581,24 +492,6 @@ async def cancel_transcribe_job(job_id: str, request: Request) -> JobCancelRespo
             canceled=False,
             reason="job already running; provider call may finish",
         )
-    # `Job.info()` reads ARQ's serialized queued definition, not untrusted
-    # caller input. Capture the request-owned key before abort removes it.
-    storage_key: str | None = None
-    try:
-        info = await job.info()
-        args = getattr(info, "args", ()) if info is not None else ()
-        if (
-            getattr(info, "function", None) == "transcribe_task"
-            and len(args) >= 9
-            and isinstance(args[8], str)
-            and args[8].startswith("transcribe-jobs/")
-        ):
-            storage_key = args[8]
-    except Exception as exc:
-        logger.warning(
-            "transcribe_job_spool_lookup_failed", job_id=job_id, error=str(exc)
-        )
-
     try:
         abort = getattr(job, "abort", None)
         if abort is None:
@@ -613,20 +506,6 @@ async def cancel_transcribe_job(job_id: str, request: Request) -> JobCancelRespo
         # flag (allow_abort_jobs=True in WorkerSettings); if confirmation
         # doesn't arrive in time, report it as advisory.
         await abort(timeout=5)
-        if storage_key:
-            storage = request.app.state.storage_client
-            try:
-                await storage.delete_object(storage_key)
-            except Exception as exc:
-                logger.warning(
-                    "transcribe_job_spool_cleanup_failed", job_id=job_id, error=str(exc)
-                )
-                return JobCancelResponse(
-                    job_id=job_id,
-                    status=str(status),
-                    canceled=False,
-                    reason="job aborted but spool cleanup failed; retry cleanup before treating it canceled",
-                )
         return JobCancelResponse(job_id=job_id, status=str(status), canceled=True)
     except (TimeoutError, asyncio.TimeoutError):
         return JobCancelResponse(

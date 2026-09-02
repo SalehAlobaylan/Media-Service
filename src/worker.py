@@ -24,7 +24,6 @@ from arq.worker import func
 from redis.asyncio import Redis
 
 from src.clients.cms import CMSClient
-from src.clients.storage import StorageClient
 from src.clients.safe_fetch import SafeFetchClient
 from src.config import Settings
 from src.middleware.request_id import _request_id_ctx
@@ -39,7 +38,6 @@ from src.utils.tempdir import resolve_media_temp_dir
 
 logger = get_logger("media-worker")
 
-
 async def _startup(ctx: dict[str, Any]) -> None:
     settings = Settings()
     setup_logging(log_level=settings.LOG_LEVEL, json_output=settings.is_production)
@@ -53,7 +51,6 @@ async def _startup(ctx: dict[str, Any]) -> None:
 
     model_manager = ModelManager(settings)
     cms_client = CMSClient(settings)
-    storage_client = StorageClient(settings)
     fetch_client = SafeFetchClient()
     admission = WorkloadAdmission(stt_limit=1, clip_limit=1)
     temp_dir = resolve_media_temp_dir(settings.MEDIA_TEMP_DIR)
@@ -79,7 +76,6 @@ async def _startup(ctx: dict[str, Any]) -> None:
     ctx["settings"] = settings
     ctx["model_manager"] = model_manager
     ctx["cms_client"] = cms_client
-    ctx["storage_client"] = storage_client
     ctx["temp_dir"] = temp_dir
     ctx["fetch_client"] = fetch_client
     ctx["workload_admission"] = admission
@@ -88,7 +84,6 @@ async def _startup(ctx: dict[str, Any]) -> None:
         "worker_ready",
         stt_provider=model_manager.stt.name,
         stt_loaded=model_manager.stt.is_loaded,
-        storage=storage_client.is_configured,
     )
 
 
@@ -146,38 +141,22 @@ async def _shutdown(ctx: dict[str, Any]) -> None:
 
 async def transcribe_task(
     ctx: dict[str, Any],
-    audio_path: str | None,
-    url: str | None,
+    url: str,
     content_id: str | None,
     transcription_job_id: str | None,
     language: str | None,
     word_timestamps: bool,
     request_id: str | None = None,
-    storage_key: str | None = None,
     media_size_bytes: int | None = None,
     artifact_recovery: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Run transcription. Exactly one of (storage_key, url, audio_path) is set.
-
-    On success returns the serialized TranscribeResponse. On error raises so
-    arq marks the job as failed (result preserved in Redis).
-
-    - storage_key: the API uploaded the audio to object storage (R2); the
-      worker downloads it to its own temp dir, transcribes, then deletes the
-      object. This is the path used for file uploads — no shared filesystem.
-    - url: the worker downloads the URL directly (no storage involved).
-    - audio_path: legacy/co-located path where the worker shares the API's
-      filesystem (e.g. the combined-container dev setup).
-    """
+    """Run one durable URL transcription task."""
     migration_redis = ctx.get("migration_redis")
     if migration_redis is not None and await migration_redis.exists("wahb:database-migration:media-quiesced"):
         raise Retry(defer=5)
     # Restore the request-id contextvar so structured logs + outbound headers
     # in this worker process carry the same trace id as the enqueueing API call.
     token = _request_id_ctx.set(request_id) if request_id else None
-    storage_client: StorageClient | None = ctx.get("storage_client")
-    local_download_path: str | None = None
-    succeeded = False
     service: TranscriptionService | None = None
     try:
         model_manager: ModelManager = ctx["model_manager"]
@@ -212,82 +191,18 @@ async def transcribe_task(
             "transcribe_task_started",
             job_id=ctx.get("job_id"),
             content_id=content_id,
-            has_storage_key=bool(storage_key),
-            has_url=bool(url),
-            has_audio_path=bool(audio_path),
+            has_url=True,
         )
 
-        try:
-            if storage_key:
-                if storage_client is None or not storage_client.is_configured:
-                    raise RuntimeError(
-                        "storage_key given but object storage not configured in worker"
-                    )
-                suffix = os.path.splitext(storage_key)[1] or ".mp3"
-                fd, local_download_path = tempfile.mkstemp(
-                    suffix=suffix, prefix="media_async_", dir=ctx.get("temp_dir")
-                )
-                os.close(fd)
-                await storage_client.download_to_path(storage_key, local_download_path)
-                response = await service.transcribe_file(
-                    local_download_path,
-                    content_id=content_id,
-                    transcription_job_id=transcription_job_id,
-                    language=language,
-                    media_size_bytes=media_size_bytes,
-                    word_timestamps=word_timestamps,
-                    artifact_recovery=artifact_recovery,
-                )
-            elif url:
-                response = await service.transcribe_url(
-                    url,
-                    content_id=content_id,
-                    transcription_job_id=transcription_job_id,
-                    language=language,
-                    media_size_bytes=media_size_bytes,
-                    word_timestamps=word_timestamps,
-                    artifact_recovery=artifact_recovery,
-                )
-            elif audio_path:
-                response = await service.transcribe_file(
-                    audio_path,
-                    content_id=content_id,
-                    transcription_job_id=transcription_job_id,
-                    language=language,
-                    media_size_bytes=media_size_bytes,
-                    word_timestamps=word_timestamps,
-                    artifact_recovery=artifact_recovery,
-                )
-            else:
-                raise ValueError("Must provide storage_key, url, or audio_path")
-            succeeded = True
-        finally:
-            # Always drop the worker-local temp files (downloaded object +
-            # legacy spool). The remote object is handled separately below.
-            for path in (local_download_path, audio_path):
-                if path and os.path.exists(path):
-                    try:
-                        os.unlink(path)
-                    except OSError:
-                        pass
-
-        # Delete the storage object only on success. On failure we leave it so
-        # an arq retry can re-download; orphans from terminal failures should be
-        # swept by a bucket lifecycle/expiry rule.
-        if (
-            succeeded
-            and storage_key
-            and storage_client
-            and storage_client.is_configured
-        ):
-            try:
-                await storage_client.delete_object(storage_key)
-            except Exception as exc:
-                logger.warning(
-                    "transcribe_storage_cleanup_failed",
-                    storage_key=storage_key,
-                    error=str(exc),
-                )
+        response = await service.transcribe_url(
+            url,
+            content_id=content_id,
+            transcription_job_id=transcription_job_id,
+            language=language,
+            media_size_bytes=media_size_bytes,
+            word_timestamps=word_timestamps,
+            artifact_recovery=artifact_recovery,
+        )
 
         transcribe_jobs_total.labels(state="completed").inc()
         logger.info(
@@ -419,6 +334,7 @@ async def content_stage_transcript_task(
                     chapters=chapters if isinstance(chapters, list) else None,
                     source=str(caption.get("source") or "youtube_auto"),
                     provider=str(caption.get("provider") or "youtube"),
+                    transcription_job_id=content.get("transcription_job_id"),
                     content_stage=cms.content_stage_correlation(claim),
                 )
                 return {"request_id": claim["request_id"], "state": "verifying"}
@@ -441,6 +357,7 @@ async def content_stage_transcript_task(
         response = await service.transcribe_url(
             url,
             content_id=claim["content_item_id"],
+            transcription_job_id=content.get("transcription_job_id"),
             word_timestamps=True,
             content_stage=cms.content_stage_correlation(claim),
         )
@@ -532,7 +449,7 @@ async def ensure_long_form_transcription_generation(
     return await cms.create_transcription_generation({
         "tenant_id": tenant_id,
         "content_item_id": content_id,
-        "transcription_job_id": claim["request_id"],
+        "transcription_job_id": content.get("transcription_job_id") or claim["request_id"],
         "input_digest": input_digest,
         "analysis_audio_manifest_id": manifest["id"],
         "provider": provider,

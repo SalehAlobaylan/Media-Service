@@ -15,6 +15,10 @@ class TranscriptionError(Exception):
     """Failure in /v1/transcribe* surface."""
 
 
+class AsyncTranscriptionURLRequiredError(TranscriptionError):
+    """Asynchronous jobs must reference already-persisted durable media."""
+
+
 class ImageEmbeddingError(Exception):
     """Failure in /v1/embed/image surface."""
 
@@ -43,6 +47,17 @@ async def global_error_handler(request: Request, exc: Exception) -> JSONResponse
                 "error_code": "WORKLOAD_OVERLOADED",
                 "retryable": True,
                 "retry_after_seconds": 1,
+                "request_id": request_id,
+            },
+        )
+
+    if isinstance(exc, AsyncTranscriptionURLRequiredError):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "Async transcription accepts only url; persist uploads through Aggregation first",
+                "error_code": "ASYNC_TRANSCRIPTION_URL_REQUIRED",
+                "retryable": False,
                 "request_id": request_id,
             },
         )

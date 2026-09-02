@@ -6,12 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.clients.cms import CMSClient
-from src.clients.storage import StorageClient
 from src.clients.safe_fetch import SafeFetchClient
 from src.config import Settings
 from src.middleware.error_handler import (
     CircuitOpenError,
     ImageEmbeddingError,
+    AsyncTranscriptionURLRequiredError,
     TranscriptionError,
     global_error_handler,
 )
@@ -20,7 +20,7 @@ from src.middleware.logging import LoggingMiddleware
 from src.middleware.request_id import RequestIDMiddleware
 from src.models.manager import ModelManager
 from src.queue import ArqPoolManager
-from src.routes import embed_image, health, transcribe
+from src.routes import caption_import, embed_image, health, transcribe
 from src.services.workload import WorkloadAdmission
 from src.utils.logging import get_logger, setup_logging
 from src.utils.tempdir import resolve_media_temp_dir
@@ -48,7 +48,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     model_manager = ModelManager(settings)
     cms_client = CMSClient(settings)
-    storage_client = StorageClient(settings)
     fetch_client = SafeFetchClient()
     admission = WorkloadAdmission()
     temp_dir = resolve_media_temp_dir(settings.MEDIA_TEMP_DIR)
@@ -66,14 +65,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as exc:
             logger.error("migration_owner_restore_failed", reason=str(exc))
 
-    if arq_pool is not None and storage_client.is_configured:
-        try:
-            reclaimed = await transcribe.sweep_orphaned_spools(storage_client, arq_pool)
-            if reclaimed:
-                logger.info("transcribe_spool_sweep_complete", reclaimed=reclaimed)
-        except Exception as exc:
-            logger.warning("transcribe_spool_sweep_failed", reason=str(exc))
-
     await model_manager.warmup()
 
     app.state.settings = settings
@@ -81,12 +72,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.cms_client = cms_client
     app.state.arq_pool = arq_pool
     app.state.queue_manager = queue_manager
-    app.state.storage_client = storage_client
     app.state.temp_dir = temp_dir
     app.state.fetch_client = fetch_client
     app.state.workload_admission = admission
 
-    logger.info("ready", models=model_manager.is_ready)
+    logger.info(
+        "startup_complete",
+        models=model_manager.is_ready,
+    )
     yield
 
     await cms_client.close()
@@ -140,10 +133,11 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 # Routes
 app.include_router(health.router)
 app.include_router(transcribe.router, prefix="/v1")
+app.include_router(caption_import.router, prefix="/v1")
 app.include_router(embed_image.router, prefix="/v1")
 app.include_router(migration_router)
 
 # Error handlers
-for exc_class in (CircuitOpenError, TranscriptionError, ImageEmbeddingError):
+for exc_class in (CircuitOpenError, TranscriptionError, AsyncTranscriptionURLRequiredError, ImageEmbeddingError):
     app.add_exception_handler(exc_class, global_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(Exception, global_error_handler)  # type: ignore[arg-type]

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
+import re
 from pathlib import Path
 
+from src.common.managed_process import run_managed_process
 from src.utils.url_guard import UnsafeURLError, validate_public_url
 
 
@@ -30,12 +30,32 @@ async def extract_audio_segment(
     duration_sec = (end_ms - start_ms) / 1000
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    latest_progress_us = -1
+
+    def ffmpeg_progress(line: bytes) -> bool:
+        nonlocal latest_progress_us
+        match = re.fullmatch(rb"out_time_(?:us|ms)=(\d+)\s*", line)
+        if match is None:
+            return False
+        value = int(match.group(1))
+        if value <= latest_progress_us:
+            return False
+        latest_progress_us = value
+        return True
+
     command = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
         "-nostdin",
+        "-threads",
+        "2",
+        "-filter_threads",
+        "1",
+        "-progress",
+        "pipe:2",
+        "-nostats",
         "-ss",
         f"{start_ms / 1000:.3f}",
         "-i",
@@ -52,22 +72,21 @@ async def extract_audio_segment(
         "-y",
         str(output),
     ]
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_sec)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await process.wait()
+        returncode, stdout, stderr = await run_managed_process(
+            command,
+            timeout_sec=timeout_sec,
+            no_progress_timeout_sec=min(180, max(30, duration_sec)),
+            progress_parser=ffmpeg_progress,
+        )
+    except asyncio.CancelledError:
+        # Cancellation is a worker lifecycle signal, not a media timeout. The
+        # supervisor has already terminated the process group; preserve the
+        # cancellation so the caller can release its lease and retry safely.
+        raise
+    except TimeoutError:
         raise TimeoutError(f"audio segment extraction exceeded {timeout_sec}s")
-    if process.returncode != 0:
+    if returncode != 0:
         detail = (stderr or stdout).decode("utf-8", errors="replace")[-4000:]
         raise RuntimeError(f"ffmpeg audio segment extraction failed: {detail}")
     if not output.exists() or output.stat().st_size == 0:
