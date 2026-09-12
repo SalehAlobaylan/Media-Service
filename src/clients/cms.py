@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from src.contracts.artifact_coverage import ArtifactCoverageClaim
+from src.contracts.long_form import TranscriptionSegmentClaim
 
 from src.clients.circuit_breaker import CircuitBreaker
 from src.config import Settings
@@ -135,7 +136,11 @@ class CMSClient:
             json={},
             metric_label="claim_transcription_segment",
         )
-        return result or None
+        if not result:
+            return None
+        # Missing capability material is a CMS contract failure. Never let
+        # the worker coerce it into the string "None" and start an effect.
+        return TranscriptionSegmentClaim.model_validate(result).model_dump(mode="json")
 
     async def transition_transcription_segment(
         self, segment_id: str, state: str, payload: dict[str, Any]
@@ -148,12 +153,12 @@ class CMSClient:
         )
 
     async def heartbeat_transcription_segment(
-        self, segment_id: str, claim_token: str
+        self, segment_id: str, claim_token: str, fence_token: str
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
             f"/internal/transcription-segments/{segment_id}/heartbeat",
-            json={"claim_token": claim_token},
+            json={"claim_token": claim_token, "fence_token": fence_token},
             metric_label="heartbeat_transcription_segment",
         )
 
@@ -182,7 +187,7 @@ class CMSClient:
 
     async def content_stage_transition(
         self, claim: dict[str, Any], action: str, **extra: Any
-    ) -> None:
+    ) -> dict[str, Any]:
         payload = {
             "request_id": claim["request_id"],
             "attempt_id": claim["attempt_id"],
@@ -192,7 +197,7 @@ class CMSClient:
             "producer_event_id": "",
             **extra,
         }
-        await self._request(
+        return await self._request(
             "POST",
             f"/internal/content-stages/{claim['request_id']}/{action}",
             json=payload,
@@ -209,8 +214,8 @@ class CMSClient:
 
     async def heartbeat_artifact_coverage(
         self, request_id: str, claim_token: str
-    ) -> None:
-        await self._request(
+    ) -> dict[str, Any]:
+        return await self._request(
             "POST",
             f"/internal/artifact-coverage/media/{request_id}/heartbeat",
             json={"claim_token": claim_token},

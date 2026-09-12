@@ -22,6 +22,14 @@ logger = get_logger(__name__)
 router = APIRouter(dependencies=[Depends(verify_service_token)])
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MB
+# The ARQ worker owns one STT effect at a time.  Keep the API from building a
+# waiting tail of ordinary URL jobs behind a durable CMS claim; those claims
+# carry short execution leases and must be admitted only when a worker slot is
+# available.  Durable CMS dispatchers use the same bound in ``worker.py``.
+_ARQ_QUEUE_KEY = "arq:queue"
+_ARQ_JOB_PREFIX = "arq:job:"
+_ARQ_RESULT_PREFIX = "arq:result:"
+_MAX_ARQ_QUEUE_DEPTH = 1
 SUPPORTED_LANGUAGES = {"ar", "en", "multi"}
 ALLOWED_AUDIO_SUFFIXES = {
     ".mp3",
@@ -50,6 +58,46 @@ async def _mark_arq_unavailable(request: Request, pool: Any) -> None:
     if manager is not None:
         await manager.mark_unavailable(pool)
         request.app.state.arq_pool = None
+
+
+async def _arq_queue_admission(
+    request: Request, pool: Any, job_id: str | None
+) -> tuple[bool, bool]:
+    """Return ``(capacity, existing)`` without guessing when Redis is down.
+
+    Small test doubles and older integrations may not expose ``zcard``/``exists``;
+    those callers retain the historical behavior.  A real ARQ pool always has
+    both methods, so a failed observation is reported as unavailable and the
+    caller can return a retryable 503 instead of adding another orphaned job.
+    """
+
+    zcard = getattr(pool, "zcard", None)
+    exists = getattr(pool, "exists", None)
+    if not callable(zcard):
+        return True, False
+
+    existing = False
+    if job_id and callable(exists):
+        try:
+            existing = bool(
+                await exists(
+                    f"{_ARQ_JOB_PREFIX}{job_id}",
+                    f"{_ARQ_RESULT_PREFIX}{job_id}",
+                )
+            )
+        except Exception as exc:
+            await _mark_arq_unavailable(request, pool)
+            logger.warning("arq_admission_probe_failed", error=str(exc))
+            return False, False
+    if existing:
+        return True, True
+    try:
+        depth = int(await zcard(_ARQ_QUEUE_KEY) or 0)
+    except Exception as exc:
+        await _mark_arq_unavailable(request, pool)
+        logger.warning("arq_admission_probe_failed", error=str(exc))
+        return False, False
+    return depth < _MAX_ARQ_QUEUE_DEPTH, False
 
 
 JobStatus = Literal["queued", "in_progress", "completed", "failed", "not_found"]
@@ -336,6 +384,26 @@ async def submit_transcribe_job(
     dedupe_key = transcription_job_id or content_id
     dedupe_id = f"transcribe:{dedupe_key}" if dedupe_key else None
     job_id = dedupe_id or f"transcribe:{uuid4().hex}"
+    has_capacity, existing = await _arq_queue_admission(request, arq_pool, job_id if dedupe_id else None)
+    if existing and dedupe_id is not None:
+        logger.info("transcribe_job_deduped", job_id=dedupe_id, content_id=content_id)
+        return JobAcceptedResponse(job_id=dedupe_id)
+    if not has_capacity:
+        # The queue is deliberately bounded rather than accumulating work that
+        # cannot start before its CMS lease expires.  Callers should retry; no
+        # durable transcription row is marked failed because no effect was
+        # admitted.
+        if getattr(request.app.state, "arq_pool", None) is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Async transcription unavailable: Redis (arq) queue probe failed",
+                headers={"Retry-After": "10"},
+            )
+        raise HTTPException(
+            status_code=429,
+            detail="Async transcription queue is busy; retry after the active job completes",
+            headers={"Retry-After": "15"},
+        )
     enqueue_attempted = False
     try:
         # Forward the current request_id into the job so the worker logs line

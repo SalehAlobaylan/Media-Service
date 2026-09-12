@@ -64,7 +64,11 @@ class Settings(BaseSettings):
 
     # Timeouts
     TRANSCRIBE_TIMEOUT_SEC: int = 600
-    CMS_REQUEST_TIMEOUT_SEC: int = 10
+    # Neon-backed CMS claims and fenced write-backs can legitimately take
+    # longer than the old ten-second transport deadline while long-form media
+    # effects hold their lease. Keep the client deadline above that latency so
+    # a slow database does not turn a healthy claim into a false worker retry.
+    CMS_REQUEST_TIMEOUT_SEC: int = 60
 
     # Redis (arq job queue) — db=2 by convention (db=0 is Aggregation
     # BullMQ, db=1 is Enrichment LLM cache).
