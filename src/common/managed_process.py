@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+from pathlib import Path
 import os
 import signal
 import time
@@ -72,6 +75,29 @@ async def run_managed_process(
         cwd=cwd,
         start_new_session=(os.name == "posix"),
     )
+    registry_path: Path | None = None
+    if os.getenv("WAHB_MANAGED_ENV") == "1" and os.getenv("WAHB_PROCESS_REGISTRY_DIR"):
+        try:
+            directory = Path(os.environ["WAHB_PROCESS_REGISTRY_DIR"])
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            registry_path = directory / f"{process.pid}.json"
+            temporary = directory / f"{process.pid}.{os.getpid()}.tmp"
+            start = subprocess.check_output(["ps", "-p", str(process.pid), "-o", "lstart="], text=True).strip()
+            record = {"runtime_id": os.environ["WAHB_RUNTIME_ID"], "owner_token": os.environ["WAHB_PROCESS_OWNER_TOKEN"], "pid": process.pid, "process_start": start}
+            descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, "w") as file:
+                json.dump(record, file)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, registry_path)
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except Exception:
+            await _terminate_process_group(process)
+            raise
     started = time.monotonic()
     last_progress = started
 
@@ -129,4 +155,6 @@ async def run_managed_process(
             if not task.done():
                 task.cancel()
         await asyncio.gather(wait_task, stdout_task, stderr_task, return_exceptions=True)
+        if registry_path is not None:
+            registry_path.unlink(missing_ok=True)
     return returncode or 0, stdout, stderr
