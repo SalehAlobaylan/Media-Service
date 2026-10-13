@@ -1,4 +1,7 @@
 import asyncio
+import time
+from src.middleware.error_handler import TranscriptionError
+from src.services.compute_meter import emit_compute
 import inspect
 import os
 import tempfile
@@ -81,8 +84,57 @@ class TranscriptionService:
         word_timestamps: bool = False,
         artifact_recovery: dict[str, str] | None = None,
         content_stage: dict[str, str] | None = None,
+        segment_context: dict | None = None,
     ) -> TranscribeResponse:
         model_size = self.stt.model_size
+        spend_context: dict = segment_context or {}
+        if self.stt.name == "deepgram" and segment_context is not None:
+            owner_id = segment_context.get("transcription_job_id")
+            if not owner_id:
+                raise TranscriptionError(
+                    "Paid segment requires its CMS-owned transcription job"
+                )
+            spend_context = await self.cms_client.get_transcription_spend_context(
+                owner_id
+            )
+            if spend_context.get("status") not in {"queued", "running"}:
+                raise TranscriptionError("Segment transcription owner is not active")
+        if (
+            self.stt.name == "deepgram"
+            and not transcription_job_id
+            and segment_context is None
+        ):
+            if content_id:
+                admission = await self.cms_client.request_stt_owner(content_id)
+                if not admission.get("triggered"):
+                    raise TranscriptionError(
+                        "STT owner declined admission: "
+                        + admission.get("reason", "unavailable")
+                    )
+                transcription_job_id = admission["job_id"]
+            else:
+                raise TranscriptionError(
+                    "Paid transcription requires a CMS-owned transcription job"
+                )
+        if transcription_job_id and hasattr(
+            self.cms_client, "get_transcription_spend_context"
+        ):
+            spend_context = await self.cms_client.get_transcription_spend_context(
+                transcription_job_id
+            )
+            if isinstance(spend_context, dict) and spend_context.get("status") in {
+                "succeeded",
+                "canceled",
+                "skipped",
+            }:
+                raise TranscriptionError("Transcription owner job is already terminal")
+            if (
+                isinstance(spend_context, dict)
+                and content_id
+                and spend_context.get("content_item_id") not in (None, content_id)
+            ):
+                raise TranscriptionError("Transcription owner content does not match")
+        started = time.perf_counter()
 
         if transcription_job_id:
             await self._update_job(
@@ -117,7 +169,10 @@ class TranscriptionService:
                             language=language,
                             word_timestamps=word_timestamps,
                         )
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
+            meter = getattr(self.cms_client, "spend_meter", None)
+            if self.stt.name == "deepgram" and meter is not None:
+                meter.unobservable_attempt(spend_context.get("tenant_id", "default"))
             if transcription_job_id:
                 await self._update_job(
                     transcription_job_id,
@@ -131,6 +186,17 @@ class TranscriptionService:
                 )
             raise
 
+        if self.stt.name in {"whisper", "faster-whisper", "local"}:
+            emit_compute(
+                getattr(self.cms_client, "spend_meter", None),
+                spend_context,
+                "stt_local",
+                model_size,
+                {
+                    "audio_sec": result.duration_sec,
+                    "compute_ms": (time.perf_counter() - started) * 1000,
+                },
+            )
         transcriptions_total.labels(status="success", model_size=model_size).inc()
 
         response = TranscribeResponse(

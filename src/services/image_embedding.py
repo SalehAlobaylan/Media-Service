@@ -8,6 +8,9 @@ transcribe write-back.
 
 from __future__ import annotations
 
+import time
+from src.services.compute_meter import emit_compute
+
 from io import BytesIO
 import warnings
 
@@ -70,6 +73,7 @@ class ImageEmbeddingService:
         content_id: str | None = None,
         artifact_recovery: dict[str, str] | None = None,
         content_stage: dict[str, str] | None = None,
+        spend_context: dict | None = None,
     ) -> ImageEmbedResponse:
         if not self.clip.is_loaded:
             image_embeddings_total.labels(status="failure").inc()
@@ -100,7 +104,15 @@ class ImageEmbeddingService:
             raise ValueError(f"Could not decode image: {exc}") from exc
 
         # CLIP encoder is CPU/GPU-bound; offload off the event loop.
+        started = time.perf_counter()
         vector = await self.admission.run_clip(self.clip.encode_image, image)
+        emit_compute(
+            getattr(self.cms_client, "spend_meter", None),
+            spend_context or {},
+            "image_embed",
+            self.clip.model_name,
+            {"items": 1, "compute_ms": (time.perf_counter() - started) * 1000},
+        )
         image_embeddings_total.labels(status="success").inc()
 
         descriptor = _space_descriptor(self.clip)
@@ -125,10 +137,15 @@ class ImageEmbeddingService:
         content_id: str | None = None,
         artifact_recovery: dict[str, str] | None = None,
         content_stage: dict[str, str] | None = None,
+        spend_context: dict | None = None,
     ) -> ImageEmbedResponse:
         image_bytes = await self._download(url)
         return await self.embed_bytes(
-            image_bytes, content_id=content_id, artifact_recovery=artifact_recovery, content_stage=content_stage
+            image_bytes,
+            content_id=content_id,
+            artifact_recovery=artifact_recovery,
+            content_stage=content_stage,
+            spend_context=spend_context,
         )
 
     async def _download(self, url: str) -> bytes:

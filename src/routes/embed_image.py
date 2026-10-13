@@ -36,6 +36,7 @@ async def embed_image(
     content_id: str | None = Form(None),
     content_stage_json: str | None = Form(None),
     artifact_recovery_json: str | None = Form(None),
+    spend_context_json: str | None = Form(None),
 ) -> ImageEmbedResponse:
     model_manager = request.app.state.model_manager
     cms_client = request.app.state.cms_client
@@ -72,8 +73,13 @@ async def embed_image(
             )
 
     try:
+        spend_context = json.loads(spend_context_json) if spend_context_json else {}
+        if not isinstance(spend_context, dict):
+            raise ValueError("spend_context must be an object")
         content_stage = json.loads(content_stage_json) if content_stage_json else None
-        artifact_recovery = json.loads(artifact_recovery_json) if artifact_recovery_json else None
+        artifact_recovery = (
+            json.loads(artifact_recovery_json) if artifact_recovery_json else None
+        )
         if content_stage is not None and not isinstance(content_stage, dict):
             raise ValueError("content_stage must be an object")
         if artifact_recovery is not None and not isinstance(artifact_recovery, dict):
@@ -85,9 +91,21 @@ async def embed_image(
                     f"Image upload exceeds maximum size of "
                     f"{IMAGE_UPLOAD_MAX_BYTES // (1024 * 1024)} MB"
                 )
-            return await service.embed_bytes(data, content_id=content_id, content_stage=content_stage, artifact_recovery=artifact_recovery)
+            return await service.embed_bytes(
+                data,
+                content_id=content_id,
+                content_stage=content_stage,
+                artifact_recovery=artifact_recovery,
+                spend_context=spend_context,
+            )
         if has_url and url is not None:
-            return await service.embed_url(url, content_id=content_id, content_stage=content_stage, artifact_recovery=artifact_recovery)
+            return await service.embed_url(
+                url,
+                content_id=content_id,
+                content_stage=content_stage,
+                artifact_recovery=artifact_recovery,
+                spend_context=spend_context,
+            )
     except ImageEmbeddingError:
         raise
     except ValueError as exc:

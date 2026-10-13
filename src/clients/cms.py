@@ -19,6 +19,7 @@ from src.contracts.long_form import TranscriptionSegmentClaim
 
 from src.clients.circuit_breaker import CircuitBreaker
 from src.config import Settings
+from src.services.spend_meter import SpendMeter
 from src.middleware.request_id import current_request_id
 from src.utils.logging import get_logger
 from src.utils.metrics import cms_writeback_total
@@ -35,6 +36,7 @@ def _is_countable_cms_failure(exc: Exception) -> bool:
 
 class CMSClient:
     def __init__(self, settings: Settings):
+        self.spend_meter: SpendMeter | None = None
         raw_base_url = settings.CMS_BASE_URL.rstrip("/")
         self.base_url = raw_base_url
         self.public_base_url = (
@@ -44,6 +46,11 @@ class CMSClient:
         )
         self.token = settings.cms_writeback_token
         self.circuit_breaker = CircuitBreaker(
+            failure_threshold=settings.CB_FAILURE_THRESHOLD,
+            reset_timeout_sec=settings.CB_RESET_TIMEOUT_SEC,
+            half_open_requests=settings.CB_HALF_OPEN_REQUESTS,
+        )
+        self.telemetry_circuit_breaker = CircuitBreaker(
             failure_threshold=settings.CB_FAILURE_THRESHOLD,
             reset_timeout_sec=settings.CB_RESET_TIMEOUT_SEC,
             half_open_requests=settings.CB_HALF_OPEN_REQUESTS,
@@ -59,7 +66,31 @@ class CMSClient:
             headers=headers,
         )
 
+    async def emit_ai_spend_events(
+        self, events: list[dict], health: dict | None = None
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/internal/ai-spend/events",
+            json={"events": events, **({"health": health} if health else {})},
+            circuit_breaker=self.telemetry_circuit_breaker,
+        )
+
+    async def request_stt_owner(self, content_id: str) -> dict:
+        return await self._request(
+            "POST",
+            f"/internal/content-items/{content_id}/request-stt",
+            json={"force": False},
+        )
+
+    async def get_transcription_spend_context(self, job_id: str) -> dict:
+        return await self._request(
+            "GET", f"/internal/transcription-jobs/{job_id}/spend-context"
+        )
+
     async def close(self) -> None:
+        if self.spend_meter is not None:
+            await self.spend_meter.close()
         await self.client.aclose()
 
     async def health_check(self) -> bool:
@@ -91,7 +122,9 @@ class CMSClient:
         )
         return result or None
 
-    async def get_artifact_manifest(self, manifest_id: str, tenant_id: str | None = None) -> dict[str, Any]:
+    async def get_artifact_manifest(
+        self, manifest_id: str, tenant_id: str | None = None
+    ) -> dict[str, Any]:
         suffix = f"?tenant_id={tenant_id}" if tenant_id else ""
         return await self._request(
             "GET",
@@ -362,6 +395,7 @@ class CMSClient:
         path: str,
         json: dict[str, Any] | None = None,
         metric_label: str = "unknown",
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> dict[str, Any]:
         async def _do_request() -> dict[str, Any]:
             url = self._build_url(path)
@@ -374,7 +408,7 @@ class CMSClient:
             return resp.json()
 
         try:
-            result = await self.circuit_breaker.execute(
+            result = await (circuit_breaker or self.circuit_breaker).execute(
                 _do_request, count_failure=_is_countable_cms_failure
             )
             cms_writeback_total.labels(endpoint=metric_label, status="success").inc()

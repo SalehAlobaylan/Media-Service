@@ -30,6 +30,7 @@ from arq.worker import func
 from redis.asyncio import Redis
 
 from src.clients.cms import CMSClient
+from src.services.spend_meter import SpendMeter
 from src.clients.safe_fetch import SafeFetchClient
 from src.config import Settings
 from src.middleware.request_id import _request_id_ctx
@@ -121,7 +122,9 @@ async def _prune_stale_cron_deliveries(redis: Any) -> int:
         # authority.  Remove both overdue and not-yet-due records emitted by a
         # previous ARQ-cron worker; retaining a future legacy tick would make
         # ARQ fail it as an unknown function and still pollute the queue.
-        ids = await redis.zrange(_ARQ_QUEUE_KEY, start=0, end=_STALE_CRON_REAPER_LIMIT - 1)
+        ids = await redis.zrange(
+            _ARQ_QUEUE_KEY, start=0, end=_STALE_CRON_REAPER_LIMIT - 1
+        )
     except Exception as exc:
         logger.warning("stale_cron_reaper_unavailable", error=str(exc))
         return 0
@@ -170,7 +173,9 @@ async def _prune_stale_cron_deliveries(redis: Any) -> int:
                 )
             results = await pipe.execute()
     except Exception as exc:
-        logger.warning("stale_cron_reaper_failed", error=str(exc), candidates=len(stale_ids))
+        logger.warning(
+            "stale_cron_reaper_failed", error=str(exc), candidates=len(stale_ids)
+        )
         return 0
 
     removed = sum(int(value or 0) for value in results)
@@ -438,9 +443,7 @@ async def _release_dispatch_lock(redis: Any, key: str, token: str) -> None:
         logger.warning("media_dispatch_lock_release_failed", key=key, error=str(exc))
 
 
-async def _run_dispatch_once(
-    ctx: dict[str, Any], lane: str, callback: Any
-) -> None:
+async def _run_dispatch_once(ctx: dict[str, Any], lane: str, callback: Any) -> None:
     redis = ctx["redis"]
     # ``lane`` remains in logs and metrics, but the lock is deliberately global
     # because all lanes enqueue into the same ARQ sorted set.
@@ -462,7 +465,9 @@ async def _run_dispatch_once(
         except Exception as exc:
             # A Redis read failure must not turn into an unbounded CMS claim
             # storm.  Skip this tick and let the next one retry.
-            logger.warning("media_dispatch_depth_unavailable", lane=lane, error=str(exc))
+            logger.warning(
+                "media_dispatch_depth_unavailable", lane=lane, error=str(exc)
+            )
             return
         if depth >= _MAX_ARQ_QUEUE_DEPTH:
             last_log = ctx.setdefault("dispatch_backpressure_log", {})
@@ -520,7 +525,9 @@ async def _fair_dispatch_loop(ctx: dict[str, Any]) -> None:
                 logger.warning("media_dispatch_tick_failed", lane=lane, error=str(exc))
         first = (first + 1) % len(_DISPATCH_SPECS)
         try:
-            await asyncio.wait_for(stop.wait(), timeout=min(s[2] for s in _DISPATCH_SPECS))
+            await asyncio.wait_for(
+                stop.wait(), timeout=min(s[2] for s in _DISPATCH_SPECS)
+            )
         except asyncio.TimeoutError:
             pass
 
@@ -595,6 +602,7 @@ async def _lease_heartbeat_loop(
                     error=str(exc),
                 )
 
+
 async def _startup(ctx: dict[str, Any]) -> None:
     settings = Settings()
     setup_logging(log_level=settings.LOG_LEVEL, json_output=settings.is_production)
@@ -608,6 +616,8 @@ async def _startup(ctx: dict[str, Any]) -> None:
 
     model_manager = ModelManager(settings)
     cms_client = CMSClient(settings)
+    cms_client.spend_meter = SpendMeter(cms_client)
+    cms_client.spend_meter.start()
     fetch_client = SafeFetchClient()
     admission = WorkloadAdmission(stt_limit=1, clip_limit=1)
     temp_dir = resolve_media_temp_dir(settings.MEDIA_TEMP_DIR)
@@ -616,6 +626,7 @@ async def _startup(ctx: dict[str, Any]) -> None:
     # durable image claims to the authenticated API route.
     await model_manager.warmup(["stt"])
     if not model_manager.stt.is_loaded:
+        await cms_client.spend_meter.close()
         await cms_client.close()
         raise RuntimeError("Refusing worker startup: STT provider is not ready")
 
@@ -669,8 +680,12 @@ async def _embed_via_api(
             data={
                 "url": image_url,
                 "content_id": content_id,
-                "content_stage_json": json.dumps(content_stage) if content_stage else "",
-                "artifact_recovery_json": json.dumps(artifact_recovery) if artifact_recovery else "",
+                "content_stage_json": json.dumps(content_stage)
+                if content_stage
+                else "",
+                "artifact_recovery_json": json.dumps(artifact_recovery)
+                if artifact_recovery
+                else "",
             },
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -717,7 +732,9 @@ async def transcribe_task(
 ) -> dict[str, Any]:
     """Run one durable URL transcription task."""
     migration_redis = ctx.get("migration_redis")
-    if migration_redis is not None and await migration_redis.exists("wahb:database-migration:media-quiesced"):
+    if migration_redis is not None and await migration_redis.exists(
+        "wahb:database-migration:media-quiesced"
+    ):
         raise Retry(defer=5)
     # Restore the request-id contextvar so structured logs + outbound headers
     # in this worker process carry the same trace id as the enqueueing API call.
@@ -971,12 +988,16 @@ async def content_stage_transcript_task(
                 )
                 return {"request_id": claim["request_id"], "state": "failed"}
             response = await _embed_via_api(
-                ctx, image_url, claim["content_item_id"],
+                ctx,
+                image_url,
+                claim["content_item_id"],
                 content_stage=cms.content_stage_correlation(claim),
             )
             if response.get("write_back_status") != "ok":
                 await cms.content_stage_transition(
-                    claim, "uncertain", summary="Image embedding writeback outcome is unknown"
+                    claim,
+                    "uncertain",
+                    summary="Image embedding writeback outcome is unknown",
                 )
                 return {"request_id": claim["request_id"], "state": "uncertain"}
             return await effect_state("verifying")
@@ -1014,10 +1035,16 @@ async def content_stage_transcript_task(
                 "provider_caption_artifact_unusable",
                 content_item_id=claim.get("content_item_id"),
             )
-        long_form_generation = await ensure_long_form_transcription_generation(ctx, claim, content)
+        long_form_generation = await ensure_long_form_transcription_generation(
+            ctx, claim, content
+        )
         if long_form_generation is not None:
             return await effect_state("verifying")
-        url = content.get("analysis_audio_url") or content.get("playback_url") or content.get("media_url")
+        url = (
+            content.get("analysis_audio_url")
+            or content.get("playback_url")
+            or content.get("media_url")
+        )
         if not url:
             await cms.content_stage_transition(
                 claim,
@@ -1075,7 +1102,9 @@ async def ensure_long_form_transcription_generation(
         return None
     url = content.get("playback_url") or content.get("media_url")
     if not isinstance(url, str) or not url.strip():
-        raise RuntimeError("long-form transcript stage has no CMS-approved playback URL")
+        raise RuntimeError(
+            "long-form transcript stage has no CMS-approved playback URL"
+        )
 
     settings: Settings = ctx["settings"]
     cms: CMSClient = ctx["cms_client"]
@@ -1084,7 +1113,9 @@ async def ensure_long_form_transcription_generation(
     provider = ctx["model_manager"].stt.name
     model = ctx["model_manager"].stt.model_size
     language = str(content.get("content_language") or settings.STT_DEFAULT_LANGUAGE)
-    input_digest = _digest(f"long-form-analysis-audio:v1|{url}|{duration_sec:.3f}|{language}|{provider}|{model}")
+    input_digest = _digest(
+        f"long-form-analysis-audio:v1|{url}|{duration_sec:.3f}|{language}|{provider}|{model}"
+    )
     existing_manifest_id = content.get("analysis_audio_manifest_id")
     if not isinstance(existing_manifest_id, str) or not existing_manifest_id.strip():
         # A repaired/legacy parent may reuse its source manifest only when the
@@ -1092,8 +1123,13 @@ async def ensure_long_form_transcription_generation(
         # an arbitrary public URL; Aggregation must first materialize and
         # verify analysis audio for a video source.
         existing_manifest_id = content.get("media_artifact_manifest_id")
-        if not isinstance(existing_manifest_id, str) or not existing_manifest_id.strip():
-            raise RuntimeError("long-form transcription requires a manifest-owned analysis-audio artifact")
+        if (
+            not isinstance(existing_manifest_id, str)
+            or not existing_manifest_id.strip()
+        ):
+            raise RuntimeError(
+                "long-form transcription requires a manifest-owned analysis-audio artifact"
+            )
     manifest = await cms.get_artifact_manifest(existing_manifest_id, tenant_id)
     manifest_content_type = str(manifest.get("content_type") or "").lower()
     if not manifest_content_type.startswith("audio/"):
@@ -1103,7 +1139,9 @@ async def ensure_long_form_transcription_generation(
     url = str(manifest.get("public_url") or content.get("analysis_audio_url") or url)
     if not url.strip():
         raise RuntimeError("long-form transcription manifest has no public URL")
-    input_digest = _digest(f"long-form-analysis-audio:v1|{url}|{duration_sec:.3f}|{language}|{provider}|{model}")
+    input_digest = _digest(
+        f"long-form-analysis-audio:v1|{url}|{duration_sec:.3f}|{language}|{provider}|{model}"
+    )
 
     segment_length_ms = 15 * 60 * 1000
     overlap_ms = 5_000
@@ -1114,29 +1152,36 @@ async def ensure_long_form_transcription_generation(
     while target_start < total_ms:
         target_end = min(total_ms, target_start + segment_length_ms)
         start_ms = max(0, target_start - (overlap_ms if target_start else 0))
-        segment_digest = _digest(f"{input_digest}|{index}|{start_ms}|{target_end}|{overlap_ms}")
-        segments.append({
-            "start_ms": start_ms,
-            "end_ms": target_end,
-            "overlap_ms": target_start - start_ms,
-            "source_digest": input_digest,
-            "segment_digest": segment_digest,
-            "artifact_manifest_id": manifest["id"],
-        })
+        segment_digest = _digest(
+            f"{input_digest}|{index}|{start_ms}|{target_end}|{overlap_ms}"
+        )
+        segments.append(
+            {
+                "start_ms": start_ms,
+                "end_ms": target_end,
+                "overlap_ms": target_start - start_ms,
+                "source_digest": input_digest,
+                "segment_digest": segment_digest,
+                "artifact_manifest_id": manifest["id"],
+            }
+        )
         index += 1
         target_start = target_end
-    return await cms.create_transcription_generation({
-        "tenant_id": tenant_id,
-        "content_item_id": content_id,
-        "transcription_job_id": content.get("transcription_job_id") or claim["request_id"],
-        "input_digest": input_digest,
-        "analysis_audio_manifest_id": manifest["id"],
-        "provider": provider,
-        "model": model,
-        "language": language,
-        "content_stage": cms.content_stage_correlation(claim),
-        "segments": segments,
-    })
+    return await cms.create_transcription_generation(
+        {
+            "tenant_id": tenant_id,
+            "content_item_id": content_id,
+            "transcription_job_id": content.get("transcription_job_id")
+            or claim["request_id"],
+            "input_digest": input_digest,
+            "analysis_audio_manifest_id": manifest["id"],
+            "provider": provider,
+            "model": model,
+            "language": language,
+            "content_stage": cms.content_stage_correlation(claim),
+            "segments": segments,
+        }
+    )
 
 
 async def transcription_segment_dispatch_tick(ctx: dict[str, Any]) -> None:
@@ -1174,15 +1219,25 @@ _DISPATCH_SPECS = (
 )
 
 
-async def transcription_segment_task(ctx: dict[str, Any], claim: dict[str, Any]) -> dict[str, str]:
+async def transcription_segment_task(
+    ctx: dict[str, Any], claim: dict[str, Any]
+) -> dict[str, str]:
     cms: CMSClient = ctx["cms_client"]
     unit = claim.get("unit") or {}
     generation = claim.get("generation") or {}
     unit_id = str(unit["id"])
     claim_token = unit.get("claim_token")
     unit_fence = unit.get("unit_fence_token") or unit.get("fence_token")
-    if not isinstance(claim_token, str) or not claim_token.strip() or not isinstance(unit_fence, str) or not unit_fence.strip() or not unit.get("lease_expires_at"):
-        raise RuntimeError("transcription segment claim is missing execution credentials")
+    if (
+        not isinstance(claim_token, str)
+        or not claim_token.strip()
+        or not isinstance(unit_fence, str)
+        or not unit_fence.strip()
+        or not unit.get("lease_expires_at")
+    ):
+        raise RuntimeError(
+            "transcription segment claim is missing execution credentials"
+        )
     # The claim endpoint intentionally leaves the effect boundary untouched.
     # Mark it running before ffmpeg/STT so an expired lease is reconciled as
     # effect-started work rather than being blindly reclaimed while a segment
@@ -1201,22 +1256,34 @@ async def transcription_segment_task(ctx: dict[str, Any], claim: dict[str, Any])
             logger.info("transcription_segment_delivery_stale", segment_id=unit_id)
             return {"segment_id": unit_id, "state": "stale"}
         raise
-    manifest_id = unit.get("artifact_manifest_id") or generation.get("analysis_audio_manifest_id")
+    manifest_id = unit.get("artifact_manifest_id") or generation.get(
+        "analysis_audio_manifest_id"
+    )
     if not manifest_id:
-        await cms.transition_transcription_segment(unit_id, "failed", {
-            "claim_token": claim_token,
-            "failure_class": "missing_analysis_audio_manifest",
-            "summary": "segment has no analysis-audio manifest",
-        })
+        await cms.transition_transcription_segment(
+            unit_id,
+            "failed",
+            {
+                "claim_token": claim_token,
+                "failure_class": "missing_analysis_audio_manifest",
+                "summary": "segment has no analysis-audio manifest",
+            },
+        )
         return {"segment_id": unit_id, "state": "failed"}
-    manifest = await cms.get_artifact_manifest(str(manifest_id), str(generation.get("tenant_id") or "default"))
+    manifest = await cms.get_artifact_manifest(
+        str(manifest_id), str(generation.get("tenant_id") or "default")
+    )
     url = manifest.get("public_url")
     if not isinstance(url, str) or not url.strip():
-        await cms.transition_transcription_segment(unit_id, "failed", {
-            "claim_token": claim_token,
-            "failure_class": "missing_analysis_audio_url",
-            "summary": "analysis-audio manifest has no public URL",
-        })
+        await cms.transition_transcription_segment(
+            unit_id,
+            "failed",
+            {
+                "claim_token": claim_token,
+                "failure_class": "missing_analysis_audio_url",
+                "summary": "analysis-audio manifest has no public URL",
+            },
+        )
         return {"segment_id": unit_id, "state": "failed"}
 
     stop = asyncio.Event()
@@ -1225,7 +1292,9 @@ async def transcription_segment_task(ctx: dict[str, Any], claim: dict[str, Any])
         _lease_heartbeat_loop(
             stop,
             heartbeat_failed,
-            lambda: cms.heartbeat_transcription_segment(unit_id, claim_token, unit_fence),
+            lambda: cms.heartbeat_transcription_segment(
+                unit_id, claim_token, unit_fence
+            ),
             f"transcription-segment:{unit_id}",
         )
     )
@@ -1233,7 +1302,11 @@ async def transcription_segment_task(ctx: dict[str, Any], claim: dict[str, Any])
     try:
         start_ms = int(unit["start_ms"])
         end_ms = int(unit["end_ms"])
-        fd, local_path = tempfile.mkstemp(suffix=".wav", prefix=f"transcript-segment-{unit_id}-", dir=ctx.get("temp_dir"))
+        fd, local_path = tempfile.mkstemp(
+            suffix=".wav",
+            prefix=f"transcript-segment-{unit_id}-",
+            dir=ctx.get("temp_dir"),
+        )
         os.close(fd)
         await extract_audio_segment(
             url,
@@ -1251,45 +1324,72 @@ async def transcription_segment_task(ctx: dict[str, Any], claim: dict[str, Any])
         )
         response = await service.transcribe_file(
             local_path,
-            language=str(generation.get("language") or ctx["settings"].STT_DEFAULT_LANGUAGE),
+            segment_context={
+                "tenant_id": generation.get("tenant_id") or "default",
+                "trigger_source": "segmented_transcription",
+                "system_run_id": str(generation["id"]),
+                "transcription_job_id": generation.get("transcription_job_id"),
+            },
+            language=str(
+                generation.get("language") or ctx["settings"].STT_DEFAULT_LANGUAGE
+            ),
             word_timestamps=True,
         )
         segments = [segment.model_dump() for segment in response.segments]
         if heartbeat_failed.is_set():
             try:
-                await cms.transition_transcription_segment(unit_id, "uncertain", {
-                    "claim_token": claim_token,
-                    "failure_class": "lease_heartbeat_failed",
-                    "summary": "segment lease heartbeat failed before verification",
-                })
+                await cms.transition_transcription_segment(
+                    unit_id,
+                    "uncertain",
+                    {
+                        "claim_token": claim_token,
+                        "failure_class": "lease_heartbeat_failed",
+                        "summary": "segment lease heartbeat failed before verification",
+                    },
+                )
             except Exception:
                 logger.exception(
                     "transcription_segment_heartbeat_uncertainty_receipt_failed",
                     segment_id=unit_id,
                 )
             return {"segment_id": unit_id, "state": "uncertain"}
-        await cms.transition_transcription_segment(unit_id, "verified", {
-            "claim_token": claim_token,
-            "transcript_text": response.text,
-            "transcript_segments": segments,
-            "summary": "segment transcription verified",
-            "artifact_manifest_ids": [str(manifest_id)],
-        })
+        await cms.transition_transcription_segment(
+            unit_id,
+            "verified",
+            {
+                "claim_token": claim_token,
+                "transcript_text": response.text,
+                "transcript_segments": segments,
+                "summary": "segment transcription verified",
+                "artifact_manifest_ids": [str(manifest_id)],
+            },
+        )
         try:
-            await cms.finalize_transcription_generation(str(generation["id"]), _generation_content_stage(generation))
+            await cms.finalize_transcription_generation(
+                str(generation["id"]), _generation_content_stage(generation)
+            )
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 409 or "TRANSCRIPTION_INCOMPLETE" not in exc.response.text:
+            if (
+                exc.response.status_code != 409
+                or "TRANSCRIPTION_INCOMPLETE" not in exc.response.text
+            ):
                 raise
         return {"segment_id": unit_id, "state": "verified"}
     except Exception as exc:
         try:
-            await cms.transition_transcription_segment(unit_id, "failed", {
-                "claim_token": claim_token,
-                "failure_class": provider_error_code(exc),
-                "summary": str(exc)[-1000:],
-            })
+            await cms.transition_transcription_segment(
+                unit_id,
+                "failed",
+                {
+                    "claim_token": claim_token,
+                    "failure_class": provider_error_code(exc),
+                    "summary": str(exc)[-1000:],
+                },
+            )
         except Exception:
-            logger.exception("transcription_segment_failure_receipt_failed", segment_id=unit_id)
+            logger.exception(
+                "transcription_segment_failure_receipt_failed", segment_id=unit_id
+            )
         raise
     finally:
         stop.set()
@@ -1308,7 +1408,14 @@ def _generation_content_stage(generation: dict[str, Any]) -> dict[str, str] | No
     value = proof.get("content_stage")
     if not isinstance(value, dict):
         return None
-    required = ("request_id", "attempt_id", "claim_token", "fence_token", "input_fingerprint", "producer_event_id")
+    required = (
+        "request_id",
+        "attempt_id",
+        "claim_token",
+        "fence_token",
+        "input_fingerprint",
+        "producer_event_id",
+    )
     if not all(isinstance(value.get(key), str) and value[key] for key in required):
         return None
     return {key: str(value[key]) for key in required}

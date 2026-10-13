@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.clients.cms import CMSClient
+from src.services.spend_meter import SpendMeter
 from src.clients.safe_fetch import SafeFetchClient
 from src.config import Settings
 from src.middleware.error_handler import (
@@ -48,6 +49,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     model_manager = ModelManager(settings)
     cms_client = CMSClient(settings)
+    spend_meter = SpendMeter(cms_client)
+    spend_meter.start()
+    cms_client.spend_meter = spend_meter
     fetch_client = SafeFetchClient()
     admission = WorkloadAdmission()
     temp_dir = resolve_media_temp_dir(settings.MEDIA_TEMP_DIR)
@@ -138,6 +142,11 @@ app.include_router(embed_image.router, prefix="/v1")
 app.include_router(migration_router)
 
 # Error handlers
-for exc_class in (CircuitOpenError, TranscriptionError, AsyncTranscriptionURLRequiredError, ImageEmbeddingError):
+for exc_class in (
+    CircuitOpenError,
+    TranscriptionError,
+    AsyncTranscriptionURLRequiredError,
+    ImageEmbeddingError,
+):
     app.add_exception_handler(exc_class, global_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(Exception, global_error_handler)  # type: ignore[arg-type]
