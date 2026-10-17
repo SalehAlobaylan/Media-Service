@@ -23,10 +23,12 @@ async def test_clip_records_executing_tenant_run_and_units_once():
             "tenant_id": "a",
             "trigger_source": "embedding_campaign",
             "system_run_id": "campaign-1",
+            "economics_attribution_ref": "content:opaque-fixture",
         },
     )
     assert len(events) == 1 and events[0]["spend_class"] == "image_embed"
     assert events[0]["tenant_id"] == "a" and events[0]["system_run_id"] == "campaign-1"
+    assert events[0]["economics_attribution_ref"] == "content:opaque-fixture"
     assert events[0]["units"]["items"] == 1 and events[0]["units"]["compute_ms"] >= 0
 
 

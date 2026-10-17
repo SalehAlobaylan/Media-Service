@@ -21,5 +21,6 @@ def emit_compute(
                 "system_run_id": context.get("system_run_id") or "",
                 "source_service": "media",
                 "human_actor_id": context.get("human_actor_id") or "",
+                "economics_attribution_ref": context.get("economics_attribution_ref") or "",
             }
         )
