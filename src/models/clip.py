@@ -6,7 +6,8 @@ vector suitable for cosine-similarity search in pgvector.
 
 from __future__ import annotations
 
-import os
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from src.utils.logging import get_logger
@@ -25,33 +26,32 @@ CLIP_MODEL_NAME = "clip-ViT-B-32"
 CLIP_DIMENSIONS = 512
 
 
-def _resolve_hf_revision(model_name: str, cache_folder: str) -> str:
-    """Best-effort immutable commit digest for a locally-cached HF model.
+def _resolve_hf_revision(model_name: str, cache_folder: str, revision: str = "") -> str:
+    """Resolve the selected SentenceTransformer manifest to an immutable commit.
 
-    sentence-transformers models like "clip-ViT-B-32" resolve to a namespaced
-    repo (sentence-transformers/clip-ViT-B-32) in the HF cache; try both the
-    bare and namespaced layouts. Returns "" when unresolvable — the caller then
-    reports the image space as lifecycle-not-ready.
+    CLIP stores its transformer config under 0_CLIPModel/, not at repository
+    root. The root modules.json manifest belongs to the exact snapshot that
+    SentenceTransformer loads and works for this multi-module artifact.
     """
-    candidates = [model_name]
-    if "/" not in model_name:
-        candidates.append(f"sentence-transformers/{model_name}")
-    for cand in candidates:
-        org_name = cand.replace("/", "--")
-        for base in (cache_folder, os.path.expanduser("~/.cache/huggingface/hub")):
-            refs_dir = os.path.join(base, f"models--{org_name}", "refs")
-            if not os.path.isdir(refs_dir):
-                continue
-            for branch in ("main", *sorted(os.listdir(refs_dir))):
-                ref_path = os.path.join(refs_dir, branch)
-                if os.path.isfile(ref_path):
-                    try:
-                        with open(ref_path, encoding="utf-8") as fh:
-                            rev = fh.read().strip()
-                        if rev:
-                            return rev
-                    except OSError:
-                        continue
+    from huggingface_hub import hf_hub_download
+
+    repo = model_name if "/" in model_name else f"sentence-transformers/{model_name}"
+    try:
+        config_path = Path(
+            hf_hub_download(
+                repo,
+                "modules.json",
+                cache_dir=cache_folder,
+                revision=revision or None,
+            )
+        )
+    except (OSError, ValueError):
+        return ""
+    for parent in config_path.parents:
+        if parent.parent.name == "snapshots" and re.fullmatch(
+            r"[0-9a-f]{40}", parent.name
+        ):
+            return parent.name
     return ""
 
 
@@ -64,7 +64,8 @@ class CLIPWrapper:
     ) -> None:
         self._model_name = model_name
         self._cache_folder = cache_folder
-        self._revision = revision.strip()
+        self._revision_selector = revision.strip()
+        self._revision = ""
         self._model = None
         self._dimensions: int = 0
 
@@ -111,10 +112,15 @@ class CLIPWrapper:
         from sentence_transformers import SentenceTransformer
 
         logger.info("loading_clip", model_name=self._model_name)
+        resolved_revision = _resolve_hf_revision(
+            self._model_name,
+            self._cache_folder,
+            self._revision_selector,
+        )
         self._model = SentenceTransformer(
             self._model_name,
             cache_folder=self._cache_folder,
-            revision=self._revision or None,
+            revision=resolved_revision or self._revision_selector or None,
         )
         # Validate dimensions by encoding a small synthetic image so we fail
         # at boot rather than at first user request if the model is broken.
@@ -123,8 +129,7 @@ class CLIPWrapper:
         probe = Image.new("RGB", (224, 224), color="black")
         test_embedding = self._model.encode([probe])
         self._dimensions = len(test_embedding[0])
-        if not self._revision:
-            self._revision = _resolve_hf_revision(self._model_name, self._cache_folder)
+        self._revision = resolved_revision
         logger.info(
             "clip_loaded",
             model_name=self._model_name,

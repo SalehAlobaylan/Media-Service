@@ -37,6 +37,7 @@ async def embed_image(
     content_stage_json: str | None = Form(None),
     artifact_recovery_json: str | None = Form(None),
     spend_context_json: str | None = Form(None),
+    embedding_campaign_json: str | None = Form(None),
 ) -> ImageEmbedResponse:
     model_manager = request.app.state.model_manager
     cms_client = request.app.state.cms_client
@@ -76,6 +77,18 @@ async def embed_image(
         spend_context = json.loads(spend_context_json) if spend_context_json else {}
         if not isinstance(spend_context, dict):
             raise ValueError("spend_context must be an object")
+        embedding_campaign = (
+            json.loads(embedding_campaign_json) if embedding_campaign_json else None
+        )
+        if embedding_campaign is not None and (
+            not isinstance(embedding_campaign, dict)
+            or not content_id
+            or content_stage_json
+            or artifact_recovery_json
+        ):
+            raise ValueError(
+                "embedding campaign requires one content and an exclusive correlation"
+            )
         content_stage = json.loads(content_stage_json) if content_stage_json else None
         artifact_recovery = (
             json.loads(artifact_recovery_json) if artifact_recovery_json else None
@@ -97,6 +110,11 @@ async def embed_image(
                 content_stage=content_stage,
                 artifact_recovery=artifact_recovery,
                 spend_context=spend_context,
+                **(
+                    {"embedding_campaign": embedding_campaign}
+                    if embedding_campaign
+                    else {}
+                ),
             )
         if has_url and url is not None:
             return await service.embed_url(
@@ -105,6 +123,11 @@ async def embed_image(
                 content_stage=content_stage,
                 artifact_recovery=artifact_recovery,
                 spend_context=spend_context,
+                **(
+                    {"embedding_campaign": embedding_campaign}
+                    if embedding_campaign
+                    else {}
+                ),
             )
     except ImageEmbeddingError:
         raise

@@ -74,6 +74,7 @@ class ImageEmbeddingService:
         artifact_recovery: dict[str, str] | None = None,
         content_stage: dict[str, str] | None = None,
         spend_context: dict | None = None,
+        embedding_campaign: dict | None = None,
     ) -> ImageEmbedResponse:
         if not self.clip.is_loaded:
             image_embeddings_total.labels(status="failure").inc()
@@ -124,7 +125,7 @@ class ImageEmbeddingService:
 
         if content_id:
             status, error = await self._write_back(
-                content_id, vector, descriptor, artifact_recovery, content_stage
+                content_id, vector, descriptor, artifact_recovery, content_stage, embedding_campaign
             )
             response.write_back_status = status
             response.write_back_error = error
@@ -138,6 +139,7 @@ class ImageEmbeddingService:
         artifact_recovery: dict[str, str] | None = None,
         content_stage: dict[str, str] | None = None,
         spend_context: dict | None = None,
+        embedding_campaign: dict | None = None,
     ) -> ImageEmbedResponse:
         image_bytes = await self._download(url)
         return await self.embed_bytes(
@@ -146,6 +148,7 @@ class ImageEmbeddingService:
             artifact_recovery=artifact_recovery,
             content_stage=content_stage,
             spend_context=spend_context,
+            **({"embedding_campaign": embedding_campaign} if embedding_campaign else {}),
         )
 
     async def _download(self, url: str) -> bytes:
@@ -160,6 +163,7 @@ class ImageEmbeddingService:
         descriptor: dict | None = None,
         artifact_recovery: dict[str, str] | None = None,
         content_stage: dict[str, str] | None = None,
+        embedding_campaign: dict | None = None,
     ) -> tuple[str, str | None]:
         if descriptor is None or not _is_writable_clip_descriptor(
             self.clip, descriptor
@@ -175,6 +179,7 @@ class ImageEmbeddingService:
                 producer_id=descriptor.get("producer_id") if descriptor else None,
                 artifact_recovery=artifact_recovery,
                 content_stage=content_stage,
+                **({"embedding_campaign": embedding_campaign} if embedding_campaign else {}),
             )
             logger.info("image_embedding_writeback_complete", content_id=content_id)
             return "ok", None

@@ -348,6 +348,7 @@ class CMSClient:
         producer_id: str | None = None,
         artifact_recovery: dict[str, str] | None = None,
         content_stage: dict[str, str] | None = None,
+        embedding_campaign: dict | None = None,
     ) -> dict[str, Any]:
         """Persist a 512-dim CLIP image embedding to content_items.image_embedding.
 
@@ -356,6 +357,8 @@ class CMSClient:
         unstamped debt rather than stamping a false-stable identity.
         """
         payload: dict[str, Any] = {"embedding": embedding}
+        if embedding_campaign:
+            payload["embedding_campaign"] = embedding_campaign
         if model:
             payload["model"] = model
         if space_id:
